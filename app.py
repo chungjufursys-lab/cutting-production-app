@@ -247,3 +247,5 @@ for i, equip in enumerate(EQUIP_TABS):
                     ws_lots.update_cell(cell.row, 7, "")
                     st.rerun()
 
+
+
