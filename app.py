@@ -49,7 +49,7 @@ scope = [
 ]
 
 creds = Credentials.from_service_account_info(
-    json.loads(st.secrets["gcp_service_account"]),
+    st.secrets["gcp_service_account"],
     scopes=scope
 )
 
@@ -246,3 +246,4 @@ for i, equip in enumerate(EQUIP_TABS):
                     ws_lots.update_cell(cell.row, 6, "WAITING")
                     ws_lots.update_cell(cell.row, 7, "")
                     st.rerun()
+
