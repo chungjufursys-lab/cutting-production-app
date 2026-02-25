@@ -2,13 +2,14 @@ import streamlit as st
 import pandas as pd
 import os
 import time
+import json
 from datetime import datetime
 import gspread
 from google.oauth2.service_account import Credentials
 
-# ==============================
+# ===================================
 # 기본 설정
-# ==============================
+# ===================================
 st.set_page_config(page_title="재단공정 작업관리", layout="wide")
 st.title("재단공정 작업관리 시스템")
 
@@ -25,9 +26,9 @@ EQUIPMENT_MAP = {
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-# ==============================
-# 오래된 파일 정리 (2일)
-# ==============================
+# ===================================
+# 오래된 파일 자동 삭제 (2일)
+# ===================================
 def cleanup_old_uploads(folder="uploads", days=2):
     now = time.time()
     cutoff = now - (days * 86400)
@@ -39,16 +40,16 @@ def cleanup_old_uploads(folder="uploads", days=2):
 
 cleanup_old_uploads()
 
-# ==============================
-# Google Sheet 연결
-# ==============================
+# ===================================
+# Google Sheets 연결
+# ===================================
 scope = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
 ]
 
 creds = Credentials.from_service_account_info(
-    st.secrets["gcp_service_account"],
+    json.loads(st.secrets["gcp_service_account"]),
     scopes=scope
 )
 
@@ -57,18 +58,20 @@ spreadsheet = client.open("cutting-production-db")
 ws_work = spreadsheet.worksheet("work_orders")
 ws_lots = spreadsheet.worksheet("lots")
 
-# ==============================
+# ===================================
 # 데이터 로드
-# ==============================
+# ===================================
 def load_work_orders():
-    return pd.DataFrame(ws_work.get_all_records())
+    data = ws_work.get_all_records()
+    return pd.DataFrame(data)
 
 def load_lots():
-    return pd.DataFrame(ws_lots.get_all_records())
+    data = ws_lots.get_all_records()
+    return pd.DataFrame(data)
 
-# ==============================
+# ===================================
 # 이동카드 검색
-# ==============================
+# ===================================
 st.markdown("## 🔍 이동카드번호 통합 검색")
 
 with st.form("search_form"):
@@ -85,13 +88,16 @@ if search_btn:
         st.warning("검색 결과 없음")
     else:
         merged = result.merge(work_df, left_on="work_order_id", right_on="id")
-        st.dataframe(merged[["equipment", "file_name", "lot_key", "qty", "status"]], use_container_width=True)
+        st.dataframe(
+            merged[["equipment", "file_name", "lot_key", "qty", "status"]],
+            use_container_width=True
+        )
 
 st.divider()
 
-# ==============================
+# ===================================
 # 업로드
-# ==============================
+# ===================================
 st.sidebar.header("관리자")
 uploaded = st.sidebar.file_uploader("ERP 엑셀 업로드", type=["xlsx"])
 
@@ -137,23 +143,27 @@ if uploaded:
         work_df = load_work_orders()
         new_id = len(work_df) + 1
 
+        equipment_value = EQUIPMENT_MAP.get(
+            str(df[equip_col].iloc[0]).strip(),
+            str(df[equip_col].iloc[0]).strip()
+        )
+
         ws_work.append_row([
             new_id,
-            EQUIPMENT_MAP.get(str(df[equip_col].iloc[0]).strip()),
+            equipment_value,
             uploaded.name,
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "WAITING"
         ])
 
+        # 파일 임시 저장
         safe_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uploaded.name}"
         path = os.path.join(UPLOAD_DIR, safe_name)
         with open(path, "wb") as f:
             f.write(uploaded.getbuffer())
 
         lots_df = load_lots()
-        lot_id_start = len(lots_df) + 1
-
-        idx_counter = lot_id_start
+        next_lot_id = len(lots_df) + 1
 
         for _, row in df.iterrows():
             try:
@@ -164,7 +174,7 @@ if uploaded:
                 continue
 
             ws_lots.append_row([
-                idx_counter,
+                next_lot_id,
                 new_id,
                 str(lot_key),
                 qty,
@@ -173,14 +183,14 @@ if uploaded:
                 ""
             ])
 
-            idx_counter += 1
+            next_lot_id += 1
 
         st.success("등록 완료")
         st.rerun()
 
-# ==============================
+# ===================================
 # 설비 탭
-# ==============================
+# ===================================
 tabs = st.tabs(EQUIP_TABS)
 
 for i, equip in enumerate(EQUIP_TABS):
@@ -195,7 +205,6 @@ for i, equip in enumerate(EQUIP_TABS):
             st.info("작업지시 없음")
             continue
 
-        # KPI
         merged = lots_df.merge(work_df, left_on="work_order_id", right_on="id")
 
         unfinished_qty = merged[merged["status_x"] == "WAITING"]["qty"].sum()
