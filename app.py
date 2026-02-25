@@ -3,16 +3,13 @@ import pandas as pd
 import os
 import time
 import json
-
 from datetime import datetime
 import gspread
 from google.oauth2.service_account import Credentials
 
-
-
-# ===================================
+# ======================================
 # 기본 설정
-# ===================================
+# ======================================
 st.set_page_config(page_title="재단공정 작업관리", layout="wide")
 st.title("재단공정 작업관리 시스템")
 
@@ -29,9 +26,9 @@ EQUIPMENT_MAP = {
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-# ===================================
-# 오래된 파일 자동 삭제 (2일)
-# ===================================
+# ======================================
+# 오래된 업로드 파일 삭제 (2일)
+# ======================================
 def cleanup_old_uploads(folder="uploads", days=2):
     now = time.time()
     cutoff = now - (days * 86400)
@@ -43,16 +40,16 @@ def cleanup_old_uploads(folder="uploads", days=2):
 
 cleanup_old_uploads()
 
-# ===================================
+# ======================================
 # Google Sheets 연결
-# ===================================
+# ======================================
 scope = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
 ]
 
 creds = Credentials.from_service_account_info(
-    st.secrets["gcp_service_account"],
+    json.loads(st.secrets["gcp_service_account"]),
     scopes=scope
 )
 
@@ -61,20 +58,18 @@ spreadsheet = client.open("cutting-production-db")
 ws_work = spreadsheet.worksheet("work_orders")
 ws_lots = spreadsheet.worksheet("lots")
 
-# ===================================
+# ======================================
 # 데이터 로드
-# ===================================
+# ======================================
 def load_work_orders():
-    data = ws_work.get_all_records()
-    return pd.DataFrame(data)
+    return pd.DataFrame(ws_work.get_all_records())
 
 def load_lots():
-    data = ws_lots.get_all_records()
-    return pd.DataFrame(data)
+    return pd.DataFrame(ws_lots.get_all_records())
 
-# ===================================
+# ======================================
 # 이동카드 검색
-# ===================================
+# ======================================
 st.markdown("## 🔍 이동카드번호 통합 검색")
 
 with st.form("search_form"):
@@ -98,9 +93,9 @@ if search_btn:
 
 st.divider()
 
-# ===================================
-# 업로드
-# ===================================
+# ======================================
+# 업로드 영역
+# ======================================
 st.sidebar.header("관리자")
 uploaded = st.sidebar.file_uploader("ERP 엑셀 업로드", type=["xlsx"])
 
@@ -159,7 +154,6 @@ if uploaded:
             "WAITING"
         ])
 
-        # 파일 임시 저장
         safe_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uploaded.name}"
         path = os.path.join(UPLOAD_DIR, safe_name)
         with open(path, "wb") as f:
@@ -191,9 +185,9 @@ if uploaded:
         st.success("등록 완료")
         st.rerun()
 
-# ===================================
+# ======================================
 # 설비 탭
-# ===================================
+# ======================================
 tabs = st.tabs(EQUIP_TABS)
 
 for i, equip in enumerate(EQUIP_TABS):
@@ -249,10 +243,3 @@ for i, equip in enumerate(EQUIP_TABS):
                     ws_lots.update_cell(cell.row, 6, "WAITING")
                     ws_lots.update_cell(cell.row, 7, "")
                     st.rerun()
-
-
-
-
-
-
-
