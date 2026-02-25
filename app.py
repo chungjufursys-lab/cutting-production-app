@@ -41,15 +41,17 @@ def cleanup_old_uploads(folder="uploads", days=2):
 cleanup_old_uploads()
 
 # ======================================
-# Google Sheets 연결
+# Google Sheets 연결 (JSON 문자열 방식)
 # ======================================
 scope = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
 ]
 
+service_account_info = json.loads(st.secrets["gcp_service_account"])
+
 creds = Credentials.from_service_account_info(
-    json.loads(st.secrets["gcp_service_account"]),
+    service_account_info,
     scopes=scope
 )
 
