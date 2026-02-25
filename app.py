@@ -1,3 +1,6 @@
+st.write("Service Account Loaded")
+st.write(st.secrets)
+
 import streamlit as st
 import pandas as pd
 import os
@@ -246,6 +249,7 @@ for i, equip in enumerate(EQUIP_TABS):
                     ws_lots.update_cell(cell.row, 6, "WAITING")
                     ws_lots.update_cell(cell.row, 7, "")
                     st.rerun()
+
 
 
 
