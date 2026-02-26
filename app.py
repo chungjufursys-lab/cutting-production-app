@@ -1,6 +1,6 @@
 # =========================
 # 재단공정 작업관리 시스템
-# gspread 안정화 버전
+# DB UI 복원 + 안정화 버전
 # =========================
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from domain.constants import (
     EQUIP_TABS,
     LOT_STATUS_WAITING,
     LOT_STATUS_DONE,
+    WO_STATUS_VOID,
 )
 from domain.schema import (
     WORK_ORDERS_COLS,
@@ -25,6 +26,7 @@ from domain.schema import (
 )
 from services.gsheet import connect_gsheet, ensure_schema, read_all_as_df, build_row_map
 from services.excel_parser import parse_excel
+from services.status_service import compute_work_order_status, count_done_total
 from services.kpi_service import compute_kpis
 
 # =========================
@@ -49,7 +51,7 @@ ensure_schema(ws_lots, LOTS_COLS, LOTS_ALIASES)
 # =========================
 # 데이터 로드
 # =========================
-@st.cache_data(ttl=15)
+@st.cache_data(ttl=10)
 def load_all():
     work_df, work_values = read_all_as_df(ws_work)
     lots_df, lots_values = read_all_as_df(ws_lots)
@@ -88,6 +90,39 @@ def next_id(df):
             pass
     return max(nums) + 1 if nums else 1
 
+
+# =========================
+# 🔍 이동카드 통합 검색 복구
+# =========================
+st.markdown("## 🔍 이동카드번호 통합 검색")
+
+with st.form("move_search_form"):
+    move_search = st.text_input("이동카드번호 입력 (예: C202602-36114)")
+    search_submit = st.form_submit_button("검색")
+
+if search_submit:
+    work_df, lots_df, _, _ = load_all()
+
+    key = move_search.strip()
+
+    merged = lots_df.merge(
+        work_df[["id", "equipment", "file_name"]],
+        left_on="work_order_id",
+        right_on="id",
+        how="left",
+    )
+
+    result = merged[merged["move_card_no"] == key][
+        ["equipment", "file_name", "lot_key", "qty", "status"]
+    ]
+
+    if result.empty:
+        st.error("검색 결과가 없습니다.")
+    else:
+        st.success(f"{len(result)}건 발견")
+        st.dataframe(result, use_container_width=True)
+
+st.divider()
 
 # =========================
 # 업로드
@@ -152,7 +187,7 @@ if do_upload and up is not None:
 st.divider()
 
 # =========================
-# 설비 탭
+# 설비 탭 (DB버전 UI 복원)
 # =========================
 tabs = st.tabs(EQUIP_TABS)
 
@@ -161,14 +196,14 @@ for i, equip in enumerate(EQUIP_TABS):
 
         work_df, lots_df, work_row_map, lots_row_map = load_all()
 
-        w = work_df[work_df["equipment"] == equip]
+        w = work_df[work_df["equipment"] == equip].copy()
 
         if w.empty:
             st.info("작업지시 없음")
             continue
 
+        # KPI
         k = compute_kpis(work_df, lots_df, equip)
-
         c1, c2, c3 = st.columns(3)
         c1.metric("진행중 작업지시", k["in_progress_cnt"])
         c2.metric("미완료 원장 (매수)", k["unfinished_qty"])
@@ -176,28 +211,54 @@ for i, equip in enumerate(EQUIP_TABS):
 
         st.divider()
 
-        for _, r in w.iterrows():
-            wid = r["id"]
-            fname = r["file_name"]
+        left, right = st.columns([1, 2])
 
-            st.subheader(fname)
+        # ------------------------
+        # 좌측: 작업지시 리스트
+        # ------------------------
+        with left:
+            options = []
+            for _, r in w.iterrows():
+                wid = r["id"]
+                done, total = count_done_total(lots_df, wid)
+                label = f"{r['status']} | {done}/{total}\n{r['file_name']}"
+                options.append((wid, label))
 
-            wlots = lots_df[lots_df["work_order_id"] == wid]
+            selected = st.radio(
+                "작업지시 선택",
+                options,
+                format_func=lambda x: x[1],
+            )
 
-            total = len(wlots)
-            done = (wlots["status"] == LOT_STATUS_DONE).sum()
+            selected_id = selected[0]
 
-            st.progress(0 if total == 0 else int(done * 100 / total))
-            st.write(f"{done}/{total}")
+        # ------------------------
+        # 우측: 원장 리스트
+        # ------------------------
+        with right:
+            wo = w[w["id"] == selected_id].iloc[0]
+
+            st.subheader(wo["file_name"])
+
+            # 원본 다운로드 복구
+            file_path = os.path.join(UPLOAD_DIR, wo["file_name"])
+            if os.path.exists(file_path):
+                with open(file_path, "rb") as f:
+                    st.download_button(
+                        "📥 원본 엑셀 다운로드",
+                        f,
+                        file_name=wo["file_name"],
+                    )
+
+            st.divider()
+
+            wlots = lots_df[lots_df["work_order_id"] == selected_id]
 
             for _, lr in wlots.iterrows():
                 lot_id = lr["id"]
                 row_no = lots_row_map.get(str(lot_id))
 
-                if row_no is None:
-                    continue
-
-                c1, c2, c3 = st.columns([3, 1, 1])
+                c1, c2, c3 = st.columns([5, 1, 1])
                 c1.write(lr["lot_key"])
                 c2.write(lr["qty"])
 
@@ -211,7 +272,7 @@ for i, equip in enumerate(EQUIP_TABS):
                         invalidate_cache()
                         st.rerun()
                 else:
-                    if c3.button("취소", key=f"u_{lot_id}"):
+                    if c3.button("완료취소", key=f"u_{lot_id}"):
                         ws_lots.update(f"F{row_no}", [[LOT_STATUS_WAITING]])
                         ws_lots.update(f"G{row_no}", [[""]])
                         invalidate_cache()
