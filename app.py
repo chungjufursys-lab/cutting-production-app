@@ -6,9 +6,6 @@ from datetime import datetime
 import gspread
 from google.oauth2.service_account import Credentials
 
-# ===============================
-# 기본 설정
-# ===============================
 st.set_page_config(page_title="재단공정 작업관리", layout="wide")
 st.title("재단공정 작업관리 시스템")
 
@@ -16,20 +13,6 @@ EQUIP_TABS = ["1호기", "2호기", "네스팅", "6호기", "곡면"]
 
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
-
-# ===============================
-# 오래된 업로드 파일 삭제 (2일 유지)
-# ===============================
-def cleanup_old_uploads(folder="uploads", days=2):
-    now = time.time()
-    cutoff = now - (days * 86400)
-    for filename in os.listdir(folder):
-        filepath = os.path.join(folder, filename)
-        if os.path.isfile(filepath):
-            if os.path.getmtime(filepath) < cutoff:
-                os.remove(filepath)
-
-cleanup_old_uploads()
 
 # ===============================
 # Google Sheets 연결
@@ -56,9 +39,6 @@ def connect_gsheet():
 
 ws_work, ws_lots = connect_gsheet()
 
-# ===============================
-# 데이터 로드
-# ===============================
 def load_work_orders():
     df = pd.DataFrame(ws_work.get_all_records())
     if not df.empty:
@@ -85,71 +65,85 @@ if uploaded_file:
         f.write(uploaded_file.getbuffer())
 
     df = pd.read_excel(save_path)
-    df.columns = df.columns.str.strip()
 
-    if "작업설비" not in df.columns:
-        st.error("엑셀에 '작업설비' 컬럼이 필요합니다.")
+    # -------------------------
+    # 설비 (A열)
+    # -------------------------
+    equipment = str(df.iloc[0, 0]).strip()
+
+    # -------------------------
+    # 원장열 자동 감지
+    # -------------------------
+    candidate_pairs = [(13,14), (14,15)]  # N,O 또는 O,P
+
+    lot_col = None
+    qty_col = None
+
+    for c1, c2 in candidate_pairs:
+        if c2 < len(df.columns):
+            sample = df.iloc[:, c1:c2+1].dropna()
+            if not sample.empty:
+                lot_col = c1
+                qty_col = c2
+                break
+
+    if lot_col is None:
+        st.error("원장 열을 찾을 수 없습니다.")
         st.stop()
 
-    equipment = df["작업설비"].iloc[0]
+    lot_df = df.iloc[:, [lot_col, qty_col]].dropna()
+    lot_df.columns = ["lot_key", "qty"]
 
+    # SUBTOTAL 제거
+    lot_df = lot_df[~lot_df["lot_key"].astype(str).str.contains("SUBTOTAL", na=False)]
+
+    if lot_df.empty:
+        st.error("원장 데이터가 없습니다.")
+        st.stop()
+
+    # -------------------------
+    # work_orders 저장
+    # -------------------------
     work_df = load_work_orders()
-    new_id = 1 if work_df.empty else work_df["id"].max() + 1
+    new_id = 1 if work_df.empty else int(work_df["id"].max()) + 1
 
     ws_work.append_row([
-        new_id,
+        int(new_id),
         uploaded_file.name,
         equipment,
         "WAITING",
         datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     ])
 
-    lot_df = df[["O", "P"]].dropna()
-    lot_df.columns = ["lot_key", "qty"]
-
+    # -------------------------
+    # lots 저장
+    # -------------------------
     lots_sheet = load_lots()
-    next_lot_id = 1 if lots_sheet.empty else lots_sheet["id"].max() + 1
+    next_lot_id = 1 if lots_sheet.empty else int(lots_sheet["id"].max()) + 1
 
     for _, row in lot_df.iterrows():
+
+        qty_value = row["qty"]
+
+        if pd.isna(qty_value):
+            continue
+
+        qty_value = int(float(qty_value))
+
         ws_lots.append_row([
-            next_lot_id,
-            new_id,
-            row["lot_key"],
-            int(row["qty"]),
+            int(next_lot_id),
+            int(new_id),
+            str(row["lot_key"]).strip(),
+            qty_value,
             "",
             "WAITING",
             ""
         ])
+
         next_lot_id += 1
 
     st.success("업로드 완료")
     st.rerun()
-
-st.divider()
-
-# ===============================
-# 이동카드 검색
-# ===============================
-st.subheader("🔍 이동카드번호 통합 검색")
-
-with st.form("search_form"):
-    move_no = st.text_input("이동카드번호 입력")
-    search_btn = st.form_submit_button("검색")
-
-if search_btn and move_no:
-    lots_df = load_lots()
-    work_df = load_work_orders()
-
-    result = lots_df[lots_df["move_card_no"] == move_no]
-
-    if result.empty:
-        st.warning("검색 결과 없음")
-    else:
-        merged = result.merge(work_df, left_on="work_order_id", right_on="id")
-        st.dataframe(
-            merged[["equipment", "file_name", "lot_key", "qty", "status_x"]],
-            use_container_width=True
-        )
 
 st.divider()
 
