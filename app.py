@@ -1,6 +1,6 @@
 # =========================
 # 재단공정 작업관리 시스템
-# DB UI 복원 + 안정화 버전
+# 최종 UI 복원 안정화 버전
 # =========================
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from domain.constants import (
     LOT_STATUS_WAITING,
     LOT_STATUS_DONE,
     WO_STATUS_VOID,
+    WO_STATUS_COMPLETED,
 )
 from domain.schema import (
     WORK_ORDERS_COLS,
@@ -65,6 +66,7 @@ def load_all():
             lots_df[c] = ""
 
     work_df["id"] = work_df["id"].astype(str)
+    work_df["status"] = work_df["status"].astype(str)
     lots_df["id"] = lots_df["id"].astype(str)
     lots_df["work_order_id"] = lots_df["work_order_id"].astype(str)
     lots_df["qty"] = pd.to_numeric(lots_df["qty"], errors="coerce").fillna(0).astype(int)
@@ -92,18 +94,16 @@ def next_id(df):
 
 
 # =========================
-# 🔍 이동카드 통합 검색 복구
+# 이동카드 검색
 # =========================
 st.markdown("## 🔍 이동카드번호 통합 검색")
 
 with st.form("move_search_form"):
-    move_search = st.text_input("이동카드번호 입력 (예: C202602-36114)")
+    move_search = st.text_input("이동카드번호 입력")
     search_submit = st.form_submit_button("검색")
 
 if search_submit:
     work_df, lots_df, _, _ = load_all()
-
-    key = move_search.strip()
 
     merged = lots_df.merge(
         work_df[["id", "equipment", "file_name"]],
@@ -112,12 +112,12 @@ if search_submit:
         how="left",
     )
 
-    result = merged[merged["move_card_no"] == key][
+    result = merged[merged["move_card_no"] == move_search][
         ["equipment", "file_name", "lot_key", "qty", "status"]
     ]
 
     if result.empty:
-        st.error("검색 결과가 없습니다.")
+        st.error("검색 결과 없음")
     else:
         st.success(f"{len(result)}건 발견")
         st.dataframe(result, use_container_width=True)
@@ -140,7 +140,7 @@ if do_upload and up is not None:
     file_hash = hashlib.sha256(file_bytes).hexdigest()
 
     if file_hash in work_df["file_hash"].astype(str).tolist():
-        st.sidebar.error("동일한 파일이 이미 등록되었습니다.")
+        st.sidebar.error("동일 파일 이미 등록됨")
         st.stop()
 
     safe_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{up.name}"
@@ -187,7 +187,7 @@ if do_upload and up is not None:
 st.divider()
 
 # =========================
-# 설비 탭 (DB버전 UI 복원)
+# 설비 탭
 # =========================
 tabs = st.tabs(EQUIP_TABS)
 
@@ -196,14 +196,23 @@ for i, equip in enumerate(EQUIP_TABS):
 
         work_df, lots_df, work_row_map, lots_row_map = load_all()
 
+        show_completed = st.checkbox("완료 작업지시 포함", key=f"comp_{equip}")
+        show_void = st.checkbox("취소 작업지시 포함", key=f"void_{equip}")
+
         w = work_df[work_df["equipment"] == equip].copy()
+
+        if not show_completed:
+            w = w[w["status"] != WO_STATUS_COMPLETED]
+
+        if not show_void:
+            w = w[w["status"] != WO_STATUS_VOID]
 
         if w.empty:
             st.info("작업지시 없음")
             continue
 
-        # KPI
         k = compute_kpis(work_df, lots_df, equip)
+
         c1, c2, c3 = st.columns(3)
         c1.metric("진행중 작업지시", k["in_progress_cnt"])
         c2.metric("미완료 원장 (매수)", k["unfinished_qty"])
@@ -213,9 +222,6 @@ for i, equip in enumerate(EQUIP_TABS):
 
         left, right = st.columns([1, 2])
 
-        # ------------------------
-        # 좌측: 작업지시 리스트
-        # ------------------------
         with left:
             options = []
             for _, r in w.iterrows():
@@ -224,31 +230,27 @@ for i, equip in enumerate(EQUIP_TABS):
                 label = f"{r['status']} | {done}/{total}\n{r['file_name']}"
                 options.append((wid, label))
 
-            selected = st.radio(
-                "작업지시 선택",
-                options,
-                format_func=lambda x: x[1],
-            )
-
+            selected = st.radio("작업지시 선택", options, format_func=lambda x: x[1])
             selected_id = selected[0]
 
-        # ------------------------
-        # 우측: 원장 리스트
-        # ------------------------
         with right:
             wo = w[w["id"] == selected_id].iloc[0]
-
             st.subheader(wo["file_name"])
 
-            # 원본 다운로드 복구
-            file_path = os.path.join(UPLOAD_DIR, wo["file_name"])
-            if os.path.exists(file_path):
+            # 원본 다운로드 (파일명 대신 저장된 실제 파일 탐색)
+            possible_files = [f for f in os.listdir(UPLOAD_DIR) if f.endswith(wo["file_name"])]
+            if possible_files:
+                file_path = os.path.join(UPLOAD_DIR, possible_files[-1])
                 with open(file_path, "rb") as f:
-                    st.download_button(
-                        "📥 원본 엑셀 다운로드",
-                        f,
-                        file_name=wo["file_name"],
-                    )
+                    st.download_button("📥 원본 엑셀 다운로드", f, file_name=wo["file_name"])
+
+            # 작업취소 버튼 복구
+            if wo["status"] != WO_STATUS_VOID:
+                if st.button("⛔ 작업지시 취소"):
+                    row_no = work_row_map.get(selected_id)
+                    ws_work.update(f"D{row_no}", [[WO_STATUS_VOID]])
+                    invalidate_cache()
+                    st.rerun()
 
             st.divider()
 
