@@ -14,14 +14,6 @@ st.title("재단공정 작업관리 시스템")
 
 EQUIP_TABS = ["1호기", "2호기", "네스팅", "6호기", "곡면"]
 
-EQUIPMENT_MAP = {
-    "판넬컷터 #1": "1호기",
-    "판넬컷터 #2": "2호기",
-    "네스팅 #1": "네스팅",
-    "판넬컷터 #6": "6호기",
-    "판넬컷터 #3(곡면)": "곡면",
-}
-
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -40,7 +32,7 @@ def cleanup_old_uploads(folder="uploads", days=2):
 cleanup_old_uploads()
 
 # ===============================
-# Google Sheets 연결 (캐싱)
+# Google Sheets 연결
 # ===============================
 @st.cache_resource
 def connect_gsheet():
@@ -68,10 +60,72 @@ ws_work, ws_lots = connect_gsheet()
 # 데이터 로드
 # ===============================
 def load_work_orders():
-    return pd.DataFrame(ws_work.get_all_records())
+    df = pd.DataFrame(ws_work.get_all_records())
+    if not df.empty:
+        df.columns = df.columns.str.strip()
+    return df
 
 def load_lots():
-    return pd.DataFrame(ws_lots.get_all_records())
+    df = pd.DataFrame(ws_lots.get_all_records())
+    if not df.empty:
+        df.columns = df.columns.str.strip()
+    return df
+
+# ===============================
+# 파일 업로드
+# ===============================
+st.subheader("📤 작업지시 업로드")
+
+uploaded_file = st.file_uploader("엑셀 파일 업로드", type=["xlsx"])
+
+if uploaded_file:
+    save_path = os.path.join(UPLOAD_DIR, uploaded_file.name)
+
+    with open(save_path, "wb") as f:
+        f.write(uploaded_file.getbuffer())
+
+    df = pd.read_excel(save_path)
+    df.columns = df.columns.str.strip()
+
+    if "작업설비" not in df.columns:
+        st.error("엑셀에 '작업설비' 컬럼이 필요합니다.")
+        st.stop()
+
+    equipment = df["작업설비"].iloc[0]
+
+    work_df = load_work_orders()
+    new_id = 1 if work_df.empty else work_df["id"].max() + 1
+
+    ws_work.append_row([
+        new_id,
+        uploaded_file.name,
+        equipment,
+        "WAITING",
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ])
+
+    lot_df = df[["O", "P"]].dropna()
+    lot_df.columns = ["lot_key", "qty"]
+
+    lots_sheet = load_lots()
+    next_lot_id = 1 if lots_sheet.empty else lots_sheet["id"].max() + 1
+
+    for _, row in lot_df.iterrows():
+        ws_lots.append_row([
+            next_lot_id,
+            new_id,
+            row["lot_key"],
+            int(row["qty"]),
+            "",
+            "WAITING",
+            ""
+        ])
+        next_lot_id += 1
+
+    st.success("업로드 완료")
+    st.rerun()
+
+st.divider()
 
 # ===============================
 # 이동카드 검색
@@ -93,7 +147,7 @@ if search_btn and move_no:
     else:
         merged = result.merge(work_df, left_on="work_order_id", right_on="id")
         st.dataframe(
-            merged[["equipment", "file_name", "lot_key", "qty", "status"]],
+            merged[["equipment", "file_name", "lot_key", "qty", "status_x"]],
             use_container_width=True
         )
 
@@ -110,10 +164,14 @@ for i, equip in enumerate(EQUIP_TABS):
         work_df = load_work_orders()
         lots_df = load_lots()
 
+        if work_df.empty:
+            st.info("작업지시 없음")
+            continue
+
         work_df = work_df[work_df["equipment"] == equip]
 
         if work_df.empty:
-            st.info("작업지시 없음")
+            st.info("해당 설비 작업 없음")
             continue
 
         merged = lots_df.merge(work_df, left_on="work_order_id", right_on="id")
