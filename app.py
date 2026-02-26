@@ -3,13 +3,11 @@ import re
 import time
 import hashlib
 from datetime import datetime
-from typing import Optional, Tuple
 
 import pandas as pd
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
-from gspread.exceptions import APIError
 
 # =====================================================
 # 기본 설정
@@ -55,44 +53,48 @@ def connect_gsheet():
 ws_work, ws_lots = connect_gsheet()
 
 # =====================================================
-# 유틸 함수
+# 안전한 데이터 로드 (KeyError 차단)
 # =====================================================
-def safe_df(ws):
+def safe_load(ws, required_cols=None):
     try:
         df = pd.DataFrame(ws.get_all_records())
     except Exception:
         return pd.DataFrame()
-    if not df.empty:
-        df.columns = df.columns.astype(str).str.strip()
-        if "id" in df.columns:
-            df = df[df["id"].astype(str).str.strip() != ""]
+
+    if df.empty:
+        return df
+
+    df.columns = df.columns.astype(str).str.strip()
+
+    if required_cols:
+        for col in required_cols:
+            if col not in df.columns:
+                return pd.DataFrame()
+
     return df
 
 def load_work():
-    return safe_df(ws_work)
+    return safe_load(ws_work, ["id", "file_name", "equipment", "status"])
 
 def load_lots():
-    return safe_df(ws_lots)
-
-def normalize_equipment(val):
-    return EQUIPMENT_MAP.get(str(val).strip())
+    return safe_load(ws_lots, ["id", "work_order_id", "lot_key", "qty", "status"])
 
 def next_id(df):
     if df.empty:
         return 1
-    ids = []
+    nums = []
     for v in df["id"]:
         try:
-            ids.append(int(float(v)))
+            nums.append(int(float(v)))
         except:
             pass
-    return max(ids) + 1 if ids else 1
+    return max(nums) + 1 if nums else 1
 
-def file_hash(file_bytes):
-    return hashlib.md5(file_bytes).hexdigest()
+def normalize_equipment(val):
+    return EQUIPMENT_MAP.get(str(val).strip())
 
 # =====================================================
-# 엑셀 자동 감지
+# 엑셀 감지
 # =====================================================
 LOT_PATTERN = re.compile(r"\d+(\.\d+)?T-[A-Za-z]+")
 
@@ -125,7 +127,7 @@ def detect_lot_qty(df):
     return result
 
 # =====================================================
-# 업로드 (중복방지 포함)
+# 업로드 (중복 방지 포함)
 # =====================================================
 st.subheader("📤 작업지시 업로드")
 
@@ -145,11 +147,9 @@ if submit and up is not None:
     st.session_state.upload_lock = True
 
     file_bytes = up.getbuffer()
-    fhash = file_hash(file_bytes)
+    fhash = hashlib.md5(file_bytes).hexdigest()
 
     work_df = load_work()
-
-    # 해시 중복 차단
     if "file_hash" in work_df.columns:
         if fhash in work_df["file_hash"].astype(str).tolist():
             st.error("동일한 파일이 이미 등록되었습니다.")
@@ -172,11 +172,14 @@ if submit and up is not None:
     new_work_id = next_id(work_df)
     created = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    headers = ws_work.row_values(1)
-    row = [new_work_id, up.name, equipment, "WAITING", created]
-    if "file_hash" in headers:
-        row.append(fhash)
-    ws_work.append_row(row)
+    ws_work.append_row([
+        new_work_id,
+        up.name,
+        equipment,
+        "WAITING",
+        created,
+        fhash
+    ])
 
     lot_df = load_lots()
     lid = next_id(lot_df)
@@ -199,27 +202,6 @@ if submit and up is not None:
 st.divider()
 
 # =====================================================
-# 이동카드 검색
-# =====================================================
-st.subheader("🔎 이동카드번호 검색")
-
-with st.form("search_form"):
-    move_no = st.text_input("이동카드번호 입력")
-    sbtn = st.form_submit_button("검색")
-
-if sbtn and move_no:
-    lots_df = load_lots()
-    work_df = load_work()
-    hits = lots_df[lots_df["move_card_no"] == move_no.strip()]
-    if hits.empty:
-        st.warning("검색 결과 없음")
-    else:
-        merged = hits.merge(work_df, left_on="work_order_id", right_on="id")
-        st.dataframe(merged[["equipment", "file_name", "lot_key", "qty", "status"]])
-
-st.divider()
-
-# =====================================================
 # 설비 탭
 # =====================================================
 tabs = st.tabs(EQUIP_TABS)
@@ -230,43 +212,54 @@ for i, equip in enumerate(EQUIP_TABS):
         work_df = load_work()
         lots_df = load_lots()
 
-        work_df = work_df[work_df["equipment"] == equip]
-
         if work_df.empty:
+            st.info("작업지시 없음")
+            continue
+
+        if "equipment" not in work_df.columns:
+            st.warning("시트 구조 오류: equipment 컬럼 없음")
+            continue
+
+        work_df["equipment"] = work_df["equipment"].astype(str).str.strip()
+        filtered = work_df[work_df["equipment"] == equip]
+
+        if filtered.empty:
             st.info("해당설비 작업없음")
             continue
 
-        for _, w in work_df.iterrows():
+        for _, w in filtered.iterrows():
             wid = w["id"]
             fname = w["file_name"]
 
-            box = st.container(border=True)
-            with box:
-                st.write(f"📄 {fname}")
+            st.subheader(fname)
 
-                wlots = lots_df[lots_df["work_order_id"] == wid]
+            if lots_df.empty:
+                st.warning("원장 데이터 없음")
+                continue
 
-                total = int(wlots["qty"].sum())
-                done = int(wlots[wlots["status"] == "DONE"]["qty"].sum())
+            wlots = lots_df[lots_df["work_order_id"] == wid]
 
-                pct = 0 if total == 0 else int(done*100/total)
-                st.progress(pct)
-                st.write(f"{done}/{total} 매")
+            total = int(wlots["qty"].sum()) if not wlots.empty else 0
+            done = int(wlots[wlots["status"] == "DONE"]["qty"].sum()) if not wlots.empty else 0
 
-                for _, r in wlots.iterrows():
-                    c1, c2, c3 = st.columns([3,1,1])
-                    c1.write(r["lot_key"])
-                    c2.write(f"{r['qty']}매")
+            pct = 0 if total == 0 else int(done * 100 / total)
+            st.progress(pct)
+            st.write(f"{done}/{total} 매")
 
-                    if r["status"] == "WAITING":
-                        if c3.button("완료", key=f"d_{wid}_{r['id']}"):
-                            cell = ws_lots.find(str(r["id"]))
-                            ws_lots.update_cell(cell.row, 6, "DONE")
-                            ws_lots.update_cell(cell.row, 7, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-                            st.rerun()
-                    else:
-                        if c3.button("취소", key=f"u_{wid}_{r['id']}"):
-                            cell = ws_lots.find(str(r["id"]))
-                            ws_lots.update_cell(cell.row, 6, "WAITING")
-                            ws_lots.update_cell(cell.row, 7, "")
-                            st.rerun()
+            for _, r in wlots.iterrows():
+                c1, c2, c3 = st.columns([3,1,1])
+                c1.write(r["lot_key"])
+                c2.write(f"{r['qty']}매")
+
+                if r["status"] == "WAITING":
+                    if c3.button("완료", key=f"d_{wid}_{r['id']}"):
+                        cell = ws_lots.find(str(r["id"]))
+                        ws_lots.update_cell(cell.row, 6, "DONE")
+                        ws_lots.update_cell(cell.row, 7, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                        st.rerun()
+                else:
+                    if c3.button("취소", key=f"u_{wid}_{r['id']}"):
+                        cell = ws_lots.find(str(r["id"]))
+                        ws_lots.update_cell(cell.row, 6, "WAITING")
+                        ws_lots.update_cell(cell.row, 7, "")
+                        st.rerun()
