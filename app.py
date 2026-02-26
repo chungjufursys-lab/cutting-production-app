@@ -1,6 +1,6 @@
 # =========================
 # 재단공정 작업관리 시스템
-# (락 제거 안정화 버전)
+# gspread 안정화 버전
 # =========================
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ from domain.constants import (
     EQUIP_TABS,
     LOT_STATUS_WAITING,
     LOT_STATUS_DONE,
-    WO_STATUS_VOID,
 )
 from domain.schema import (
     WORK_ORDERS_COLS,
@@ -26,7 +25,6 @@ from domain.schema import (
 )
 from services.gsheet import connect_gsheet, ensure_schema, read_all_as_df, build_row_map
 from services.excel_parser import parse_excel
-from services.status_service import compute_work_order_status, count_done_total
 from services.kpi_service import compute_kpis
 
 # =========================
@@ -45,9 +43,6 @@ handles = connect_gsheet()
 ws_work = handles.ws_work
 ws_lots = handles.ws_lots
 
-# =========================
-# 스키마 보정
-# =========================
 ensure_schema(ws_work, WORK_ORDERS_COLS, WORK_ORDERS_ALIASES)
 ensure_schema(ws_lots, LOTS_COLS, LOTS_ALIASES)
 
@@ -95,7 +90,7 @@ def next_id(df):
 
 
 # =========================
-# 업로드 (락 제거)
+# 업로드
 # =========================
 st.sidebar.header("관리자")
 
@@ -148,11 +143,7 @@ if do_upload and up is not None:
         ])
         new_lot_id += 1
 
-    if hasattr(ws_lots, "append_rows"):
-        ws_lots.append_rows(rows, value_input_option="USER_ENTERED")
-    else:
-        for row in rows:
-            ws_lots.append_row(row)
+    ws_lots.append_rows(rows, value_input_option="USER_ENTERED")
 
     st.sidebar.success("업로드 완료")
     invalidate_cache()
@@ -161,7 +152,7 @@ if do_upload and up is not None:
 st.divider()
 
 # =========================
-# 설비 탭 UI
+# 설비 탭
 # =========================
 tabs = st.tabs(EQUIP_TABS)
 
@@ -203,19 +194,25 @@ for i, equip in enumerate(EQUIP_TABS):
                 lot_id = lr["id"]
                 row_no = lots_row_map.get(str(lot_id))
 
+                if row_no is None:
+                    continue
+
                 c1, c2, c3 = st.columns([3, 1, 1])
                 c1.write(lr["lot_key"])
                 c2.write(lr["qty"])
 
                 if lr["status"] == LOT_STATUS_WAITING:
                     if c3.button("완료", key=f"d_{lot_id}"):
-                        ws_lots.update(f"F{row_no}", LOT_STATUS_DONE)
-                        ws_lots.update(f"G{row_no}", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                        ws_lots.update(f"F{row_no}", [[LOT_STATUS_DONE]])
+                        ws_lots.update(
+                            f"G{row_no}",
+                            [[datetime.now().strftime("%Y-%m-%d %H:%M:%S")]]
+                        )
                         invalidate_cache()
                         st.rerun()
                 else:
                     if c3.button("취소", key=f"u_{lot_id}"):
-                        ws_lots.update(f"F{row_no}", LOT_STATUS_WAITING)
-                        ws_lots.update(f"G{row_no}", "")
+                        ws_lots.update(f"F{row_no}", [[LOT_STATUS_WAITING]])
+                        ws_lots.update(f"G{row_no}", [[""]])
                         invalidate_cache()
                         st.rerun()
