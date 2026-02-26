@@ -2,14 +2,13 @@ import streamlit as st
 import pandas as pd
 import os
 import time
-import json
 from datetime import datetime
 import gspread
 from google.oauth2.service_account import Credentials
 
-# ======================================
+# ===============================
 # 기본 설정
-# ======================================
+# ===============================
 st.set_page_config(page_title="재단공정 작업관리", layout="wide")
 st.title("재단공정 작업관리 시스템")
 
@@ -26,9 +25,9 @@ EQUIPMENT_MAP = {
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-# ======================================
-# 오래된 업로드 파일 삭제 (2일)
-# ======================================
+# ===============================
+# 오래된 업로드 파일 삭제 (2일 유지)
+# ===============================
 def cleanup_old_uploads(folder="uploads", days=2):
     now = time.time()
     cutoff = now - (days * 86400)
@@ -40,45 +39,50 @@ def cleanup_old_uploads(folder="uploads", days=2):
 
 cleanup_old_uploads()
 
-# ======================================
-# Google Sheets 연결 (JSON 문자열 방식)
-# ======================================
-scope = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive"
-]
+# ===============================
+# Google Sheets 연결 (캐싱)
+# ===============================
+@st.cache_resource
+def connect_gsheet():
+    scope = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
 
-service_account_info = json.loads(st.secrets["gcp_service_account"])
+    creds = Credentials.from_service_account_info(
+        st.secrets["gcp_service_account"],
+        scopes=scope
+    )
 
-creds = Credentials.from_service_account_info(
-    service_account_info,
-    scopes=scope
-)
+    client = gspread.authorize(creds)
+    spreadsheet = client.open("cutting-production-db")
 
-client = gspread.authorize(creds)
-spreadsheet = client.open("cutting-production-db")
-ws_work = spreadsheet.worksheet("work_orders")
-ws_lots = spreadsheet.worksheet("lots")
+    return (
+        spreadsheet.worksheet("work_orders"),
+        spreadsheet.worksheet("lots")
+    )
 
-# ======================================
+ws_work, ws_lots = connect_gsheet()
+
+# ===============================
 # 데이터 로드
-# ======================================
+# ===============================
 def load_work_orders():
     return pd.DataFrame(ws_work.get_all_records())
 
 def load_lots():
     return pd.DataFrame(ws_lots.get_all_records())
 
-# ======================================
+# ===============================
 # 이동카드 검색
-# ======================================
-st.markdown("## 🔍 이동카드번호 통합 검색")
+# ===============================
+st.subheader("🔍 이동카드번호 통합 검색")
 
 with st.form("search_form"):
     move_no = st.text_input("이동카드번호 입력")
     search_btn = st.form_submit_button("검색")
 
-if search_btn:
+if search_btn and move_no:
     lots_df = load_lots()
     work_df = load_work_orders()
 
@@ -95,101 +99,9 @@ if search_btn:
 
 st.divider()
 
-# ======================================
-# 업로드 영역
-# ======================================
-st.sidebar.header("관리자")
-uploaded = st.sidebar.file_uploader("ERP 엑셀 업로드", type=["xlsx"])
-
-def detect_equipment_column(df):
-    for col in df.columns:
-        if df[col].astype(str).str.contains("판넬컷터|네스팅", regex=True).any():
-            return col
-    return None
-
-def detect_lot_column(df):
-    for col in df.columns[::-1]:
-        if df[col].astype(str).str.contains(r"\d+T-", regex=True).any():
-            return col
-    return None
-
-def detect_qty_column(df, lot_col):
-    cols = list(df.columns)
-    idx = cols.index(lot_col)
-    for col in cols[idx+1:]:
-        try:
-            float(df[col].dropna().iloc[0])
-            return col
-        except:
-            continue
-    return None
-
-def detect_move_card_column(df):
-    for col in df.columns:
-        if df[col].astype(str).str.contains(r"C\d{6}-\d+", regex=True).any():
-            return col
-    return None
-
-if uploaded:
-    df = pd.read_excel(uploaded)
-
-    equip_col = detect_equipment_column(df)
-    lot_col = detect_lot_column(df)
-    qty_col = detect_qty_column(df, lot_col)
-    move_col = detect_move_card_column(df)
-
-    if st.sidebar.button("작업지시 등록"):
-
-        work_df = load_work_orders()
-        new_id = len(work_df) + 1
-
-        equipment_value = EQUIPMENT_MAP.get(
-            str(df[equip_col].iloc[0]).strip(),
-            str(df[equip_col].iloc[0]).strip()
-        )
-
-        ws_work.append_row([
-            new_id,
-            equipment_value,
-            uploaded.name,
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "WAITING"
-        ])
-
-        safe_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uploaded.name}"
-        path = os.path.join(UPLOAD_DIR, safe_name)
-        with open(path, "wb") as f:
-            f.write(uploaded.getbuffer())
-
-        lots_df = load_lots()
-        next_lot_id = len(lots_df) + 1
-
-        for _, row in df.iterrows():
-            try:
-                lot_key = row[lot_col]
-                qty = int(float(row[qty_col]))
-                move_no = row.get(move_col, "")
-            except:
-                continue
-
-            ws_lots.append_row([
-                next_lot_id,
-                new_id,
-                str(lot_key),
-                qty,
-                str(move_no),
-                "WAITING",
-                ""
-            ])
-
-            next_lot_id += 1
-
-        st.success("등록 완료")
-        st.rerun()
-
-# ======================================
+# ===============================
 # 설비 탭
-# ======================================
+# ===============================
 tabs = st.tabs(EQUIP_TABS)
 
 for i, equip in enumerate(EQUIP_TABS):
