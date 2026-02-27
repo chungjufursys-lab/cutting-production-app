@@ -112,19 +112,44 @@ def detect_lot_column(df):
     return None
 
 
+def _qty_column_score(series: pd.Series) -> float:
+    numeric = pd.to_numeric(series, errors="coerce").dropna()
+    if len(numeric) < 5:
+        return float("-inf")
+
+    int_ratio = (numeric % 1 == 0).mean()
+    positive_ratio = (numeric > 0).mean()
+    small_ratio = (numeric <= 1000).mean()
+    median = float(numeric.median())
+
+    score = (int_ratio * 2.0) + (positive_ratio * 1.5) + (small_ratio * 1.5)
+    if median > 2000:
+        score -= 2.5
+    elif median > 1000:
+        score -= 1.2
+    return score
+
+
 def detect_qty_column(df, lot_col):
     cols = list(df.columns)
     idx = cols.index(lot_col)
-    for col in cols[idx + 1 :]:
-        s = df[col].dropna().head(50)
-        if len(s) == 0:
+
+    candidates: list[tuple[float, int, str]] = []
+    for offset, col in enumerate(cols[idx + 1 :], start=1):
+        sample = df[col].dropna().head(120)
+        score = _qty_column_score(sample)
+        if score == float("-inf"):
             continue
-        try:
-            float(s.iloc[0])
-            return col
-        except Exception:
-            continue
-    return None
+
+        # LOT 옆에 붙은 수량 컬럼을 우대
+        distance_penalty = offset * 0.08
+        candidates.append((score - distance_penalty, offset, col))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return candidates[0][2]
 
 
 def detect_move_card_column(df):
