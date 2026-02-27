@@ -35,7 +35,7 @@ def connect_gsheet():
 ws_work, ws_lots = connect_gsheet()
 
 # =====================================================
-# 안전 로딩 함수 (완전 안정화 버전)
+# 안전 로딩 함수 (데이터 0건이어도 컬럼 유지)
 # =====================================================
 def load_ws(ws, required_cols):
     try:
@@ -45,24 +45,20 @@ def load_ws(ws, required_cols):
         st.stop()
 
     if not data:
-        # 시트 자체가 완전히 비어있는 경우
         return pd.DataFrame(columns=required_cols)
 
     header = [h.strip() for h in data[0]]
 
-    # 헤더 검증
     for col in required_cols:
         if col not in header:
             st.error(f"시트 구조 오류: '{col}' 컬럼이 없습니다.")
             st.stop()
 
-    # 데이터 행이 없는 경우 (헤더만 존재)
     if len(data) == 1:
         return pd.DataFrame(columns=header)
 
     df = pd.DataFrame(data[1:], columns=header)
 
-    # 숫자 컬럼 변환 (안정성 강화)
     if "id" in df.columns:
         df["id"] = pd.to_numeric(df["id"], errors="coerce")
 
@@ -71,13 +67,15 @@ def load_ws(ws, required_cols):
 
     return df
 
+def next_id(df):
+    if df.empty:
+        return 1
+    return int(df["id"].max()) + 1
+
 # =====================================================
 # 상태 자동 계산
 # =====================================================
 def update_status(work_df, lots_df):
-    if work_df.empty or lots_df.empty:
-        return
-
     for _, row in work_df.iterrows():
         wid = row["id"]
 
@@ -85,6 +83,7 @@ def update_status(work_df, lots_df):
             continue
 
         wlots = lots_df[lots_df["work_order_id"] == wid]
+
         if wlots.empty:
             continue
 
@@ -103,12 +102,12 @@ def update_status(work_df, lots_df):
             ws_work.update_cell(cell.row, 4, new_status)
 
 # =====================================================
-# 10일 Drive 자동 정리
+# Drive 10일 자동 정리
 # =====================================================
 cleanup_old_files(10)
 
 # =====================================================
-# 업로드 영역 (엑셀 필수, PDF 선택)
+# 업로드 영역
 # =====================================================
 st.sidebar.header("📤 작업지시 업로드")
 
@@ -122,26 +121,25 @@ if st.sidebar.button("업로드 실행"):
         st.stop()
 
     work_df = load_ws(ws_work, [
-    "id","file_name","equipment","status",
-    "created_at","file_hash",
-    "excel_drive_file_id","pdf_drive_file_id"
-])
+        "id","file_name","equipment","status",
+        "created_at","file_hash",
+        "excel_drive_file_id","pdf_drive_file_id"
+    ])
 
     new_work_id = next_id(work_df)
-    file_hash = hashlib.md5(excel_file.getbuffer()).hexdigest()
 
+    file_hash = hashlib.md5(excel_file.getbuffer()).hexdigest()
     if not work_df.empty and file_hash in work_df["file_hash"].astype(str).tolist():
         st.sidebar.error("이미 등록된 파일입니다.")
         st.stop()
 
-    # 엑셀 Drive 저장
+    # 엑셀 Drive 업로드
     excel_id = upload_file(
         excel_file.getbuffer(),
         f"WO_{new_work_id}_{excel_file.name}",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
-    # PDF 선택 저장
     pdf_id = ""
     if pdf_file:
         pdf_id = upload_file(
@@ -165,10 +163,10 @@ if st.sidebar.button("업로드 실행"):
     ])
 
     lots_df = load_ws(ws_lots, [
-    "id","work_order_id","lot_key",
-    "qty","move_card_no","status","done_at"
-])
-    
+        "id","work_order_id","lot_key",
+        "qty","move_card_no","status","done_at"
+    ])
+
     lot_id = next_id(lots_df)
 
     for _, r in df.iterrows():
@@ -191,7 +189,7 @@ if st.sidebar.button("업로드 실행"):
     st.rerun()
 
 # =====================================================
-# 설비 탭 (DB버전 UI 복원)
+# 설비 탭 UI
 # =====================================================
 tabs = st.tabs(EQUIP_TABS)
 
@@ -225,15 +223,6 @@ for i, equip in enumerate(EQUIP_TABS):
         if filtered.empty:
             st.info("작업지시 없음")
             continue
-
-        # KPI
-        equip_lots = lots_df[lots_df["work_order_id"].isin(filtered["id"])]
-        unfinished = len(equip_lots[equip_lots["status"] == "WAITING"])
-        today_done = len(equip_lots[equip_lots["status"] == "DONE"])
-
-        k1, k2 = st.columns(2)
-        k1.metric("미완료 원장", unfinished)
-        k2.metric("완료 원장", today_done)
 
         left, right = st.columns([1,2])
 
@@ -270,7 +259,7 @@ for i, equip in enumerate(EQUIP_TABS):
                         st.rerun()
 
 # =====================================================
-# 이동카드 검색 (좌측 유지)
+# 이동카드 검색
 # =====================================================
 st.sidebar.divider()
 st.sidebar.header("🔍 이동카드 검색")
@@ -303,4 +292,3 @@ if st.sidebar.button("검색"):
             merged[["equipment", "file_name", "lot_key", "status"]],
             use_container_width=True
         )
-
