@@ -1,9 +1,3 @@
- (cd "$(git rev-parse --show-toplevel)" && git apply --3way <<'EOF' 
-diff --git a/app.py b/app.py
-index 839e1d02f95216f879e03d0da7222ab557ac3243..f326654ffa979f6ff11d1406c8fab65ec9c9c1a3 100644
---- a/app.py
-+++ b/app.py
-@@ -1,525 +1,448 @@
 -import streamlit as st
 -import pandas as pd
 -from datetime import datetime
@@ -980,3 +974,4 @@ index 839e1d02f95216f879e03d0da7222ab557ac3243..f326654ffa979f6ff11d1406c8fab65e
  
 EOF
 )
+
