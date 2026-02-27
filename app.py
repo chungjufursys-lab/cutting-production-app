@@ -130,6 +130,19 @@ def _qty_column_score(series: pd.Series) -> float:
     return score
 
 
+def _qty_header_score(col_name) -> float:
+    name = str(col_name).lower().replace(" ", "")
+    positive_keywords = ["qty", "수량", "계획량", "매수", "ea", "pcs"]
+    negative_keywords = ["규격", "폭", "길이", "두께", "중량", "면적"]
+
+    score = 0.0
+    if any(k in name for k in positive_keywords):
+        score += 1.5
+    if any(k in name for k in negative_keywords):
+        score -= 2.0
+    return score
+
+
 def detect_qty_column(df, lot_col):
     cols = list(df.columns)
     idx = cols.index(lot_col)
@@ -141,15 +154,20 @@ def detect_qty_column(df, lot_col):
         if score == float("-inf"):
             continue
 
-        # LOT 옆에 붙은 수량 컬럼을 우대
-        distance_penalty = offset * 0.08
-        candidates.append((score - distance_penalty, offset, col))
+        header_bonus = _qty_header_score(col)
+        # LOT과 멀어질수록 감점, 가까운 우측 컬럼 우대
+        distance_penalty = offset * 0.12
+        final_score = score + header_bonus - distance_penalty
+        candidates.append((final_score, offset, col))
 
     if not candidates:
         return None
 
-    candidates.sort(key=lambda x: x[0], reverse=True)
-    return candidates[0][2]
+    # 근접 후보(LOT 기준 우측 8칸 이내)가 있으면 우선 선택
+    nearby = [c for c in candidates if c[1] <= 8]
+    target = nearby if nearby else candidates
+    target.sort(key=lambda x: x[0], reverse=True)
+    return target[0][2]
 
 
 def detect_move_card_column(df):
@@ -223,6 +241,7 @@ def build_lot_qty_move_groups(df) -> list[dict]:
 def collect_lot_entries(df: pd.DataFrame, lot_groups: list[dict]) -> list[dict]:
     entries: list[dict] = []
     for _, row in df.iterrows():
+        row_seen: set[tuple[str, int, tuple[str, ...]]] = set()
         for group in lot_groups:
             lot_col = group["lot_col"]
             qty_col = group["qty_col"]
@@ -238,11 +257,17 @@ def collect_lot_entries(df: pd.DataFrame, lot_groups: list[dict]) -> list[dict]:
                 continue
 
             move_raw = row.get(move_col) if move_col else ""
+            move_cards = parse_move_cards(move_raw)
+            dedup_key = (lot_key_value, qty, tuple(move_cards))
+            if dedup_key in row_seen:
+                continue
+            row_seen.add(dedup_key)
+
             entries.append(
                 {
                     "lot_key": lot_key_value,
                     "qty": qty,
-                    "move_cards": parse_move_cards(move_raw),
+                    "move_cards": move_cards,
                 }
             )
     return entries
