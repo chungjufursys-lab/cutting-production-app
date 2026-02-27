@@ -312,3 +312,50 @@ for i, equip in enumerate(EQUIP_TABS):
                         recalc_work_order_status(selected_id)
                         append_ledger("UNDONE", "system", selected_id, r["id"])
                         st.rerun()
+
+# =========================
+# 📎 이동카드 PDF 업로드 / 교체
+# =========================
+
+st.subheader("📎 이동카드 PDF")
+
+pdf_uploaded = st.file_uploader(
+    "PDF 업로드 / 교체",
+    type=["pdf"],
+    key=f"pdf_upload_{equip}_{selected_id}"
+)
+
+if pdf_uploaded:
+    pdf_name = f"{selected_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+    pdf_path = os.path.join(UPLOAD_DIR, pdf_name)
+
+    with open(pdf_path, "wb") as f:
+        f.write(pdf_uploaded.getbuffer())
+
+    # work_orders 시트 pdf_file_path 업데이트
+    ws = get_sheet(st.secrets["sheets"]["workorders_sheet"])
+    rows = ws.get_all_records()
+    header = ws.row_values(1)
+
+    id_col = header.index("id") + 1
+    pdf_col = header.index("pdf_file_path") + 1
+
+    for i, row in enumerate(rows, start=2):
+        if str(row["id"]) == str(selected_id):
+            ws.update_cell(i, pdf_col, pdf_path)
+            break
+
+    append_ledger("PDF_UPLOAD", "system", selected_id, "", pdf_name)
+
+    st.success("PDF 업로드 완료")
+    st.rerun()
+
+# 기존 PDF 다운로드 버튼
+if wo.get("pdf_file_path") and os.path.exists(wo["pdf_file_path"]):
+    with open(wo["pdf_file_path"], "rb") as f:
+        st.download_button(
+            "📥 PDF 다운로드",
+            f,
+            file_name=os.path.basename(wo["pdf_file_path"]),
+            key=f"pdf_down_{equip}_{selected_id}"
+        )
