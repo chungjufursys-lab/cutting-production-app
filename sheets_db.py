@@ -3,10 +3,6 @@ import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime
 
-# =========================
-# 🔹 Google Sheets 연결
-# =========================
-
 @st.cache_resource
 def get_client():
     scopes = [
@@ -20,28 +16,31 @@ def get_client():
     return gspread.authorize(creds)
 
 
-def get_sheet(name):
+def get_spreadsheet():
     client = get_client()
-    sh = client.open_by_key(st.secrets["sheets"]["spreadsheet_id"])
-    return sh.worksheet(name)
+    return client.open_by_key(st.secrets["sheets"]["spreadsheet_id"])
+
+
+def get_ws(name):
+    return get_spreadsheet().worksheet(name)
 
 
 # =========================
-# 🔹 work_orders
+# work_orders
 # =========================
 
 def get_work_orders():
-    ws = get_sheet(st.secrets["sheets"]["workorders_sheet"])
+    ws = get_ws(st.secrets["sheets"]["workorders_sheet"])
     return ws.get_all_records()
 
 
 def insert_work_order(data: dict):
-    ws = get_sheet(st.secrets["sheets"]["workorders_sheet"])
+    ws = get_ws(st.secrets["sheets"]["workorders_sheet"])
     ws.append_row(list(data.values()), value_input_option="USER_ENTERED")
 
 
 def update_work_order_status(work_order_id, new_status):
-    ws = get_sheet(st.secrets["sheets"]["workorders_sheet"])
+    ws = get_ws(st.secrets["sheets"]["workorders_sheet"])
     rows = ws.get_all_records()
     header = ws.row_values(1)
 
@@ -54,12 +53,26 @@ def update_work_order_status(work_order_id, new_status):
             break
 
 
+def update_pdf_path(work_order_id, pdf_path):
+    ws = get_ws(st.secrets["sheets"]["workorders_sheet"])
+    rows = ws.get_all_records()
+    header = ws.row_values(1)
+
+    id_col = header.index("id") + 1
+    pdf_col = header.index("pdf_file_path") + 1
+
+    for i, row in enumerate(rows, start=2):
+        if str(row["id"]) == str(work_order_id):
+            ws.update_cell(i, pdf_col, pdf_path)
+            break
+
+
 # =========================
-# 🔹 lots
+# lots
 # =========================
 
 def get_lots(work_order_id=None):
-    ws = get_sheet(st.secrets["sheets"]["lots_sheet"])
+    ws = get_ws(st.secrets["sheets"]["lots_sheet"])
     rows = ws.get_all_records()
     if work_order_id is None:
         return rows
@@ -67,12 +80,12 @@ def get_lots(work_order_id=None):
 
 
 def insert_lot(data: dict):
-    ws = get_sheet(st.secrets["sheets"]["lots_sheet"])
+    ws = get_ws(st.secrets["sheets"]["lots_sheet"])
     ws.append_row(list(data.values()), value_input_option="USER_ENTERED")
 
 
 def update_lot_status(lot_id, new_status):
-    ws = get_sheet(st.secrets["sheets"]["lots_sheet"])
+    ws = get_ws(st.secrets["sheets"]["lots_sheet"])
     rows = ws.get_all_records()
     header = ws.row_values(1)
 
@@ -91,11 +104,11 @@ def update_lot_status(lot_id, new_status):
 
 
 # =========================
-# 🔹 LEDGER
+# LEDGER
 # =========================
 
 def append_ledger(action, user, work_order_id="", lot_id="", note=""):
-    ws = get_sheet(st.secrets["sheets"]["ledger_sheet"])
+    ws = get_ws(st.secrets["sheets"]["ledger_sheet"])
     ws.append_row([
         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         action,
