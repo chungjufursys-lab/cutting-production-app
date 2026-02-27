@@ -27,7 +27,7 @@ def get_sheet(name):
 
 
 # =========================
-# 🔹 work_orders 관련
+# 🔹 work_orders
 # =========================
 
 def get_work_orders():
@@ -55,7 +55,7 @@ def update_work_order_status(work_order_id, new_status):
 
 
 # =========================
-# 🔹 lots 관련
+# 🔹 lots
 # =========================
 
 def get_lots(work_order_id=None):
@@ -91,7 +91,7 @@ def update_lot_status(lot_id, new_status):
 
 
 # =========================
-# 🔹 LEDGER 기록
+# 🔹 LEDGER
 # =========================
 
 def append_ledger(action, user, work_order_id="", lot_id="", note=""):
