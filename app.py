@@ -35,32 +35,41 @@ def connect_gsheet():
 ws_work, ws_lots = connect_gsheet()
 
 # =====================================================
-# 안전 로딩 함수
+# 안전 로딩 함수 (완전 안정화 버전)
 # =====================================================
-def load_ws(ws, required_cols=None):
+def load_ws(ws, required_cols):
     try:
-        df = pd.DataFrame(ws.get_all_records())
+        data = ws.get_all_values()
     except Exception as e:
         st.error(f"시트 로딩 실패: {e}")
         st.stop()
 
-    if df.empty:
-        return df
+    if not data:
+        # 시트 자체가 완전히 비어있는 경우
+        return pd.DataFrame(columns=required_cols)
 
-    df.columns = df.columns.astype(str).str.strip()
+    header = [h.strip() for h in data[0]]
 
-    if required_cols:
-        for col in required_cols:
-            if col not in df.columns:
-                st.error(f"시트 구조 오류: '{col}' 컬럼이 없습니다.")
-                st.stop()
+    # 헤더 검증
+    for col in required_cols:
+        if col not in header:
+            st.error(f"시트 구조 오류: '{col}' 컬럼이 없습니다.")
+            st.stop()
+
+    # 데이터 행이 없는 경우 (헤더만 존재)
+    if len(data) == 1:
+        return pd.DataFrame(columns=header)
+
+    df = pd.DataFrame(data[1:], columns=header)
+
+    # 숫자 컬럼 변환 (안정성 강화)
+    if "id" in df.columns:
+        df["id"] = pd.to_numeric(df["id"], errors="coerce")
+
+    if "work_order_id" in df.columns:
+        df["work_order_id"] = pd.to_numeric(df["work_order_id"], errors="coerce")
 
     return df
-
-def next_id(df):
-    if df.empty:
-        return 1
-    return int(max(df["id"])) + 1
 
 # =====================================================
 # 상태 자동 계산
@@ -113,10 +122,10 @@ if st.sidebar.button("업로드 실행"):
         st.stop()
 
     work_df = load_ws(ws_work, [
-        "id","file_name","equipment","status",
-        "created_at","file_hash",
-        "excel_drive_file_id","pdf_drive_file_id"
-    ])
+    "id","file_name","equipment","status",
+    "created_at","file_hash",
+    "excel_drive_file_id","pdf_drive_file_id"
+])
 
     new_work_id = next_id(work_df)
     file_hash = hashlib.md5(excel_file.getbuffer()).hexdigest()
@@ -156,10 +165,10 @@ if st.sidebar.button("업로드 실행"):
     ])
 
     lots_df = load_ws(ws_lots, [
-        "id","work_order_id","lot_key",
-        "qty","move_card_no","status","done_at"
-    ])
-
+    "id","work_order_id","lot_key",
+    "qty","move_card_no","status","done_at"
+])
+    
     lot_id = next_id(lots_df)
 
     for _, r in df.iterrows():
@@ -294,3 +303,4 @@ if st.sidebar.button("검색"):
             merged[["equipment", "file_name", "lot_key", "status"]],
             use_container_width=True
         )
+
