@@ -8,43 +8,44 @@ import streamlit as st
 DRIVE_FOLDER_ID = "1IqdyN-PptGWpOFaDFoah5QcyUMmzvDbl"
 
 def get_drive_service():
-    scope = [
-        "https://www.googleapis.com/auth/drive",
-    ]
+    scope = ["https://www.googleapis.com/auth/drive"]
     creds = Credentials.from_service_account_info(
         st.secrets["gcp_service_account"],
         scopes=scope,
     )
     return build("drive", "v3", credentials=creds)
 
-
-def upload_pdf_to_drive(file_bytes, filename):
+def upload_file(file_bytes, filename, mime):
     service = get_drive_service()
 
-    file_metadata = {
+    metadata = {
         "name": filename,
         "parents": [DRIVE_FOLDER_ID],
     }
 
     media = MediaIoBaseUpload(
         io.BytesIO(file_bytes),
-        mimetype="application/pdf",
+        mimetype=mime,
         resumable=False,
     )
 
     file = service.files().create(
-        body=file_metadata,
+        body=metadata,
         media_body=media,
         fields="id"
     ).execute()
 
     return file.get("id")
 
-
-def delete_drive_file(file_id):
-    service = get_drive_service()
-    service.files().delete(fileId=file_id).execute()
-
-
-def generate_drive_link(file_id):
+def generate_link(file_id):
     return f"https://drive.google.com/file/d/{file_id}/view"
+
+def cleanup_old_files(days=10):
+    service = get_drive_service()
+    cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat() + "Z"
+
+    query = f"'{DRIVE_FOLDER_ID}' in parents and createdTime < '{cutoff}'"
+
+    results = service.files().list(q=query, fields="files(id)").execute()
+    for file in results.get("files", []):
+        service.files().delete(fileId=file["id"]).execute()
