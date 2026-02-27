@@ -278,25 +278,15 @@ with st.sidebar.expander("📤 작업지시 등록 (엑셀 + PDF 선택)", expan
             ok = False
 
         if ok:
-            extracted_rows = []
-            for _, row in df.iterrows():
-                for group in lot_groups:
-                    lot_key = row.get(group["lot_col"])
-                    qty = safe_int(row.get(group["qty_col"]), None)
-                    if pd.isna(lot_key) or qty is None:
-                        continue
-                    lot_key_value = str(lot_key).strip()
-                    if not lot_key_value:
-                        continue
-                    move = row.get(group["move_col"]) if group["move_col"] else ""
-                    extracted_rows.append({"lot_key": lot_key_value, "qty": qty, "move": move})
-
-            preview_df = pd.DataFrame(extracted_rows)
+            preview_df = df.copy()
+            preview_df["__lot_key__"] = preview_df[lot_col].astype(str).str.strip()
+            preview_df["__qty__"] = pd.to_numeric(preview_df[qty_col], errors="coerce")
+            preview_df = preview_df[(preview_df["__lot_key__"] != "") & preview_df["__qty__"].notna()]
             total_rows = len(preview_df)
-            unique_lots = preview_df["lot_key"].nunique() if total_rows else 0
+            unique_lots = preview_df["__lot_key__"].nunique()
             duplicated_rows = max(total_rows - unique_lots, 0)
             st.caption(f"업로드 미리보기: 유효 행 {total_rows}건 / 고유 LOT {unique_lots}건 / LOT 중복 행 {duplicated_rows}건")
-            st.info("같은 LOT가 여러 열/행에 있으면 수량은 합산되고 이동카드는 중복 제거 후 함께 저장됩니다.")
+            st.info("같은 LOT가 여러 행에 있으면 수량은 합산되고 이동카드는 중복 제거 후 함께 저장됩니다.")
 
         if st.button("✅ 작업지시 등록", disabled=(not ok), use_container_width=True):
             excel_path = save_upload(uploaded_excel)
@@ -329,26 +319,25 @@ with st.sidebar.expander("📤 작업지시 등록 (엑셀 + PDF 선택)", expan
                 lot_map: dict[str, dict] = {}
 
                 for _, row in sub.iterrows():
-                    for group in lot_groups:
-                        lot_key = row.get(group["lot_col"])
-                        qty = safe_int(row.get(group["qty_col"]), None)
-                        if pd.isna(lot_key) or qty is None:
-                            continue
+                    lot_key = row.get(lot_col)
+                    qty = safe_int(row.get(qty_col), None)
+                    if pd.isna(lot_key) or qty is None:
+                        continue
 
-                        lot_key_value = str(lot_key).strip()
-                        if not lot_key_value:
-                            continue
+                    lot_key_value = str(lot_key).strip()
+                    if not lot_key_value:
+                        continue
 
-                        move = row.get(group["move_col"]) if group["move_col"] else ""
-                        lot_data = lot_map.setdefault(
-                            lot_key_value,
-                            {
-                                "qty": 0,
-                                "move_cards": [],
-                            },
-                        )
-                        lot_data["qty"] += qty
-                        lot_data["move_cards"].extend(parse_move_cards(move))
+                    move = row.get(move_col) if move_col else ""
+                    lot_data = lot_map.setdefault(
+                        lot_key_value,
+                        {
+                            "qty": 0,
+                            "move_cards": [],
+                        },
+                    )
+                    lot_data["qty"] += qty
+                    lot_data["move_cards"].extend(parse_move_cards(move))
 
                 for lot_key_value, lot_data in lot_map.items():
                     insert_lot(
