@@ -8,7 +8,6 @@ from google.oauth2.service_account import Credentials
 
 from services.drive_service import (
     upload_pdf_to_drive,
-    delete_drive_file,
     generate_drive_link
 )
 
@@ -40,10 +39,12 @@ def connect_gsheet():
 ws_work, ws_lots = connect_gsheet()
 
 # =========================
-# 안전 로드
+# 공통 함수
 # =========================
 def load_ws(ws):
     df = pd.DataFrame(ws.get_all_records())
+    if df.empty:
+        return df
     df.columns = df.columns.astype(str).str.strip()
     return df
 
@@ -53,41 +54,30 @@ def next_id(df):
     return int(max(df["id"])) + 1
 
 # =========================
-# 업로드 영역
+# 좌측 업로드 영역
 # =========================
 st.sidebar.header("📤 작업지시 업로드")
 
-excel_file = st.sidebar.file_uploader("ERP 엑셀 업로드", type=["xlsx"])
-pdf_file = st.sidebar.file_uploader("이동카드 PDF 업로드 (필수)", type=["pdf"])
+excel_file = st.sidebar.file_uploader("ERP 엑셀 업로드 (필수)", type=["xlsx"])
+pdf_file = st.sidebar.file_uploader("이동카드 PDF (선택)", type=["pdf"])
 
 if st.sidebar.button("업로드 실행"):
 
     if excel_file is None:
-        st.sidebar.error("엑셀 파일이 필요합니다.")
-        st.stop()
-
-    if pdf_file is None:
-        st.sidebar.error("이동카드 PDF는 필수입니다.")
+        st.sidebar.error("엑셀은 필수입니다.")
         st.stop()
 
     work_df = load_ws(ws_work)
     new_work_id = next_id(work_df)
 
-    # =====================
-    # 1. PDF Drive 업로드
-    # =====================
-    pdf_bytes = pdf_file.getbuffer()
-    drive_filename = f"WO_{new_work_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-
-    try:
+    # PDF 처리 (선택)
+    file_id = ""
+    if pdf_file is not None:
+        pdf_bytes = pdf_file.getbuffer()
+        drive_filename = f"WO_{new_work_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
         file_id = upload_pdf_to_drive(pdf_bytes, drive_filename)
-    except Exception as e:
-        st.sidebar.error("Drive 업로드 실패")
-        st.stop()
 
-    # =====================
-    # 2. 엑셀 처리
-    # =====================
+    # 엑셀 처리
     df = pd.read_excel(excel_file)
 
     equipment = str(df.iloc[0, 0]).strip()
@@ -121,10 +111,8 @@ if st.sidebar.button("업로드 실행"):
         ])
         lot_id += 1
 
-    st.success("작업지시 + PDF 업로드 완료")
+    st.success("작업지시 등록 완료")
     st.rerun()
-
-st.divider()
 
 # =========================
 # 설비 탭
@@ -164,21 +152,72 @@ for i, equip in enumerate(EQUIP_TABS):
             wo = work_df[work_df["id"] == selected].iloc[0]
             pdf_id = wo.get("pdf_drive_file_id", "")
 
-            if pdf_id:
-                link = generate_drive_link(pdf_id)
-                st.link_button("📎 부품이동카드 열기", link)
+            st.subheader("📎 이동카드")
 
-                if st.button("🗑 PDF 삭제", key=f"del_{selected}"):
-                    delete_drive_file(pdf_id)
+            # PDF 없을 경우 → 추가 가능
+            if not pdf_id:
+                new_pdf = st.file_uploader("PDF 추가 업로드", type=["pdf"], key=f"addpdf_{selected}")
+                if new_pdf:
+                    new_file_id = upload_pdf_to_drive(
+                        new_pdf.getbuffer(),
+                        f"WO_{selected}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+                    )
                     cell = ws_work.find(str(selected))
-                    ws_work.update_cell(cell.row, work_df.columns.get_loc("pdf_drive_file_id")+1, "")
+                    ws_work.update_cell(cell.row, work_df.columns.get_loc("pdf_drive_file_id")+1, new_file_id)
+                    st.success("PDF 등록 완료")
+                    st.rerun()
+            else:
+                link = generate_drive_link(pdf_id)
+                st.link_button("📎 이동카드 열기", link)
+
+                replace_pdf = st.file_uploader("PDF 교체", type=["pdf"], key=f"reppdf_{selected}")
+                if replace_pdf:
+                    new_file_id = upload_pdf_to_drive(
+                        replace_pdf.getbuffer(),
+                        f"WO_{selected}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+                    )
+                    cell = ws_work.find(str(selected))
+                    ws_work.update_cell(cell.row, work_df.columns.get_loc("pdf_drive_file_id")+1, new_file_id)
+                    st.success("PDF 교체 완료")
                     st.rerun()
 
-            st.subheader("원장 목록")
+            st.divider()
 
+            st.subheader("원장 목록")
             wlots = lots_df[lots_df["work_order_id"] == selected]
 
             for _, r in wlots.iterrows():
                 c1, c2 = st.columns([3,1])
                 c1.write(r["lot_key"])
                 c2.write(r["status"])
+
+# =========================
+# 이동카드 검색 (좌측 하단)
+# =========================
+st.sidebar.divider()
+st.sidebar.header("🔍 이동카드 검색")
+
+search_key = st.sidebar.text_input("이동카드번호 입력")
+
+if st.sidebar.button("검색"):
+    if search_key.strip() == "":
+        st.sidebar.warning("번호 입력 필요")
+    else:
+        lots_df = load_ws(ws_lots)
+        work_df = load_ws(ws_work)
+
+        result = lots_df[lots_df["move_card_no"] == search_key.strip()]
+
+        if result.empty:
+            st.error("검색 결과 없음")
+        else:
+            merged = result.merge(
+                work_df,
+                left_on="work_order_id",
+                right_on="id",
+                how="left"
+            )
+            st.dataframe(
+                merged[["equipment", "file_name", "lot_key", "status"]],
+                use_container_width=True
+            )
