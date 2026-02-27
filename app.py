@@ -203,3 +203,112 @@ if uploaded:
 
         st.sidebar.success("작업지시 등록 완료")
         st.rerun()
+
+# =========================
+# 설비 탭
+# =========================
+
+tabs = st.tabs(EQUIP_TABS)
+
+for i, equip in enumerate(EQUIP_TABS):
+    with tabs[i]:
+
+        show_completed = st.checkbox("완료 작업지시 포함", key=f"comp_{equip}")
+        show_void = st.checkbox("취소 작업지시 포함", key=f"void_{equip}")
+
+        all_work_orders = get_work_orders()
+        work_orders = [w for w in all_work_orders if w["equipment"] == equip]
+
+        if not show_completed:
+            work_orders = [w for w in work_orders if w["status"] != "COMPLETED"]
+
+        if not show_void:
+            work_orders = [w for w in work_orders if w["status"] != "VOID"]
+
+        work_orders = sorted(work_orders, key=lambda x: x["created_at"], reverse=True)
+
+        # KPI 계산
+        all_lots = get_lots()
+        equip_lots = [
+            l for l in all_lots
+            if any(str(w["id"]) == str(l["work_order_id"]) and w["equipment"] == equip and w["status"] != "VOID"
+                   for w in all_work_orders)
+        ]
+
+        unfinished_qty = sum(int(l["qty"]) for l in equip_lots if l["status"] == "WAITING")
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        today_done_qty = sum(
+            int(l["qty"]) for l in equip_lots
+            if l["status"] == "DONE" and str(l["done_at"]).startswith(today)
+        )
+
+        in_progress_cnt = sum(1 for w in work_orders if w["status"] == "IN_PROGRESS")
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("진행중 작업지시", in_progress_cnt)
+        c2.metric("미완료 원장 (매수)", unfinished_qty)
+        c3.metric("오늘 완료 원장 (매수)", today_done_qty)
+
+        st.divider()
+
+        if len(work_orders) == 0:
+            st.info("작업지시 없음")
+            continue
+
+        left, right = st.columns([1, 2])
+
+        with left:
+            options = []
+            for w in work_orders:
+                done, total, status = recalc_work_order_status(w["id"])
+                options.append((w["id"], f"{status} | {done}/{total}\n{w['file_name']}"))
+
+            selected = st.radio("작업지시 선택", options, format_func=lambda x: x[1])
+            selected_id = selected[0]
+
+        with right:
+            wo = next(w for w in work_orders if w["id"] == selected_id)
+            wo_status = wo["status"]
+
+            if wo_status != "VOID":
+                if st.button("⛔ 작업지시 취소", key=f"void_{equip}_{selected_id}"):
+                    update_work_order_status(selected_id, "VOID")
+                    append_ledger("VOID", "system", selected_id, "", "")
+                    st.rerun()
+
+            if wo.get("excel_file_path") and os.path.exists(wo["excel_file_path"]):
+                with open(wo["excel_file_path"], "rb") as f:
+                    st.download_button(
+                        "📥 원본 엑셀 다운로드",
+                        f,
+                        file_name=wo["file_name"],
+                        key=f"down_{equip}_{selected_id}"
+                    )
+
+            st.divider()
+
+            lots_df = get_lots(selected_id)
+
+            for r in lots_df:
+                c1, c2, c3, c4 = st.columns([5, 1, 1, 1])
+                c1.write(r["lot_key"])
+                c2.write(r["qty"])
+                c3.write(r["status"])
+
+                if wo_status == "VOID":
+                    c4.write("-")
+                    continue
+
+                if r["status"] == "WAITING":
+                    if c4.button("완료", key=f"done_{r['id']}"):
+                        update_lot_status(r["id"], "DONE")
+                        recalc_work_order_status(selected_id)
+                        append_ledger("DONE", "system", selected_id, r["id"])
+                        st.rerun()
+                else:
+                    if c4.button("완료취소", key=f"undo_{r['id']}"):
+                        update_lot_status(r["id"], "WAITING")
+                        recalc_work_order_status(selected_id)
+                        append_ledger("UNDONE", "system", selected_id, r["id"])
+                        st.rerun()
