@@ -1,4 +1,5 @@
 import os
+import re
 from datetime import datetime
 from html import escape
 from textwrap import dedent
@@ -154,6 +155,11 @@ def detect_move_card_columns(df) -> list[str]:
     return cols
 
 
+def normalize_header_name(col_name) -> str:
+    base = re.sub(r"\.\d+$", "", str(col_name))
+    return re.sub(r"\s+", "", base).lower()
+
+
 def build_lot_qty_move_groups(df) -> list[dict]:
     cols = list(df.columns)
     col_index = {col: i for i, col in enumerate(cols)}
@@ -161,26 +167,60 @@ def build_lot_qty_move_groups(df) -> list[dict]:
     move_cols = detect_move_card_columns(df)
 
     groups = []
-    used_move_cols = set()
+    move_cols_by_name: dict[str, list[str]] = {}
+    for col in move_cols:
+        move_cols_by_name.setdefault(normalize_header_name(col), []).append(col)
+
     for lot_col in lot_cols:
         qty_col = detect_qty_column(df, lot_col)
+        if not qty_col:
+            continue
+
         lot_idx = col_index[lot_col]
+        lot_base = normalize_header_name(lot_col)
 
-        candidate_moves = [
-            m for m in move_cols
-            if col_index[m] > lot_idx and m not in used_move_cols
-        ]
-        if not candidate_moves:
-            candidate_moves = [m for m in move_cols if m not in used_move_cols]
-
+        # 1순위: LOT 컬럼과 헤더 이름이 같은 이동카드 컬럼
+        # (헤더가 비어있어도 '' 이름으로 비교 가능)
+        same_name_moves = move_cols_by_name.get(lot_base, [])
         move_col = None
-        if candidate_moves:
-            move_col = min(candidate_moves, key=lambda m: abs(col_index[m] - lot_idx))
-            used_move_cols.add(move_col)
+        if same_name_moves:
+            move_col = min(same_name_moves, key=lambda m: abs(col_index[m] - lot_idx))
+
+        # 2순위: 위치 기반 가장 가까운 이동카드 컬럼
+        if not move_col and move_cols:
+            move_col = min(move_cols, key=lambda m: abs(col_index[m] - lot_idx))
 
         groups.append({"lot_col": lot_col, "qty_col": qty_col, "move_col": move_col})
 
-    return [g for g in groups if g["qty_col"]]
+    return groups
+
+
+def collect_lot_entries(df: pd.DataFrame, lot_groups: list[dict]) -> list[dict]:
+    entries: list[dict] = []
+    for _, row in df.iterrows():
+        for group in lot_groups:
+            lot_col = group["lot_col"]
+            qty_col = group["qty_col"]
+            move_col = group.get("move_col")
+
+            lot_key = row.get(lot_col)
+            qty = safe_int(row.get(qty_col), None)
+            if pd.isna(lot_key) or qty is None:
+                continue
+
+            lot_key_value = str(lot_key).strip()
+            if not lot_key_value:
+                continue
+
+            move_raw = row.get(move_col) if move_col else ""
+            entries.append(
+                {
+                    "lot_key": lot_key_value,
+                    "qty": qty,
+                    "move_cards": parse_move_cards(move_raw),
+                }
+            )
+    return entries
 
 
 def save_upload(uploaded_file, prefix=""):
@@ -278,12 +318,9 @@ with st.sidebar.expander("📤 작업지시 등록 (엑셀 + PDF 선택)", expan
             ok = False
 
         if ok:
-            preview_df = df.copy()
-            preview_df["__lot_key__"] = preview_df[lot_col].astype(str).str.strip()
-            preview_df["__qty__"] = pd.to_numeric(preview_df[qty_col], errors="coerce")
-            preview_df = preview_df[(preview_df["__lot_key__"] != "") & preview_df["__qty__"].notna()]
-            total_rows = len(preview_df)
-            unique_lots = preview_df["__lot_key__"].nunique()
+            preview_entries = collect_lot_entries(df, lot_groups)
+            total_rows = len(preview_entries)
+            unique_lots = len({e["lot_key"] for e in preview_entries})
             duplicated_rows = max(total_rows - unique_lots, 0)
             st.caption(f"업로드 미리보기: 유효 행 {total_rows}건 / 고유 LOT {unique_lots}건 / LOT 중복 행 {duplicated_rows}건")
             st.info("같은 LOT가 여러 행에 있으면 수량은 합산되고 이동카드는 중복 제거 후 함께 저장됩니다.")
@@ -318,17 +355,8 @@ with st.sidebar.expander("📤 작업지시 등록 (엑셀 + PDF 선택)", expan
 
                 lot_map: dict[str, dict] = {}
 
-                for _, row in sub.iterrows():
-                    lot_key = row.get(lot_col)
-                    qty = safe_int(row.get(qty_col), None)
-                    if pd.isna(lot_key) or qty is None:
-                        continue
-
-                    lot_key_value = str(lot_key).strip()
-                    if not lot_key_value:
-                        continue
-
-                    move = row.get(move_col) if move_col else ""
+                for entry in collect_lot_entries(sub, lot_groups):
+                    lot_key_value = entry["lot_key"]
                     lot_data = lot_map.setdefault(
                         lot_key_value,
                         {
@@ -336,8 +364,8 @@ with st.sidebar.expander("📤 작업지시 등록 (엑셀 + PDF 선택)", expan
                             "move_cards": [],
                         },
                     )
-                    lot_data["qty"] += qty
-                    lot_data["move_cards"].extend(parse_move_cards(move))
+                    lot_data["qty"] += entry["qty"]
+                    lot_data["move_cards"].extend(entry["move_cards"])
 
                 for lot_key_value, lot_data in lot_map.items():
                     insert_lot(
@@ -496,7 +524,6 @@ for idx, equip in enumerate(EQUIP_TABS):
                 for lot in pending_lots:
                     lot_key = str(lot.get("lot_key", ""))
                     qty = safe_int(lot.get("qty"), 0)
-                    move = format_move_cards_for_display(lot.get("move_card_no", ""))
                     body = dedent(f"""
                     <div style='display:flex; gap:20px; justify-content:space-between; flex-wrap:wrap;'>
                       <div style='min-width:180px;'>
@@ -508,8 +535,8 @@ for idx, equip in enumerate(EQUIP_TABS):
                         <div style='font-size:30px; font-weight:800; margin-top:8px;'>{qty}</div>
                       </div>
                       <div style='min-width:220px;'>
-                        <div style='font-size:14px; color:#6b7280; border-bottom:1px solid #e5e7eb; padding-bottom:4px;'>이동카드</div>
-                        <div style='font-size:24px; font-weight:800; margin-top:8px; white-space:pre-line;'>{escape(move)}</div>
+                        <div style='font-size:14px; color:#6b7280; border-bottom:1px solid #e5e7eb; padding-bottom:4px;'>작업상태</div>
+                        <div style='font-size:24px; font-weight:800; margin-top:8px; white-space:pre-line;'>대기중</div>
                       </div>
                     </div>
                     """).strip()
