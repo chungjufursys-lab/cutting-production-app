@@ -57,6 +57,32 @@ def now_str():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def parse_move_cards(raw_value) -> list[str]:
+    text = "" if pd.isna(raw_value) else str(raw_value).strip()
+    if not text:
+        return []
+
+    chunks = [part.strip() for part in text.replace("\n", ",").replace(";", ",").split(",")]
+    return [part for part in chunks if part]
+
+
+def format_move_cards_for_display(raw_value, *, sep="\n") -> str:
+    cards = parse_move_cards(raw_value)
+    return sep.join(cards) if cards else "-"
+
+
+def merge_move_cards(values: list[str]) -> str:
+    uniq = []
+    seen = set()
+    for value in values:
+        card = str(value).strip()
+        if not card or card in seen:
+            continue
+        seen.add(card)
+        uniq.append(card)
+    return ", ".join(uniq)
+
+
 def compute_work_order_status(current_wo_status: str, lots: list[dict]) -> str:
     if current_wo_status == "VOID":
         return "VOID"
@@ -109,6 +135,54 @@ def detect_move_card_column(df):
     return None
 
 
+def detect_lot_columns(df) -> list[str]:
+    cols = []
+    for col in df.columns:
+        sample = df[col].dropna().astype(str).head(80)
+        if sample.str.contains(r"\d+T-", regex=True).any():
+            cols.append(col)
+    return cols
+
+
+def detect_move_card_columns(df) -> list[str]:
+    pattern = r"C\d{6}-\d+"
+    cols = []
+    for col in df.columns:
+        sample = df[col].dropna().astype(str).head(100)
+        if sample.str.contains(pattern, regex=True).any():
+            cols.append(col)
+    return cols
+
+
+def build_lot_qty_move_groups(df) -> list[dict]:
+    cols = list(df.columns)
+    col_index = {col: i for i, col in enumerate(cols)}
+    lot_cols = detect_lot_columns(df)
+    move_cols = detect_move_card_columns(df)
+
+    groups = []
+    used_move_cols = set()
+    for lot_col in lot_cols:
+        qty_col = detect_qty_column(df, lot_col)
+        lot_idx = col_index[lot_col]
+
+        candidate_moves = [
+            m for m in move_cols
+            if col_index[m] > lot_idx and m not in used_move_cols
+        ]
+        if not candidate_moves:
+            candidate_moves = [m for m in move_cols if m not in used_move_cols]
+
+        move_col = None
+        if candidate_moves:
+            move_col = min(candidate_moves, key=lambda m: abs(col_index[m] - lot_idx))
+            used_move_cols.add(move_col)
+
+        groups.append({"lot_col": lot_col, "qty_col": qty_col, "move_col": move_col})
+
+    return [g for g in groups if g["qty_col"]]
+
+
 def save_upload(uploaded_file, prefix=""):
     filename = f"{prefix}{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uploaded_file.name}"
     path = os.path.join(UPLOAD_DIR, filename)
@@ -134,6 +208,7 @@ st.sidebar.header("관리자")
 with st.sidebar.expander("🔍 이동카드번호 통합 검색", expanded=False):
     with st.form("move_search_form_sidebar"):
         move_search = st.text_input("이동카드번호 입력", placeholder="예: C202602-36114")
+        search_mode = st.radio("검색 방식", ["정확히 일치", "포함"], horizontal=True)
         search_submit = st.form_submit_button("검색")
 
     if search_submit:
@@ -142,9 +217,17 @@ with st.sidebar.expander("🔍 이동카드번호 통합 검색", expanded=False
             st.warning("이동카드번호를 입력하세요.")
         else:
             rows = []
+            keyword_lower = keyword.lower()
             for lot in ALL_LOTS:
-                if str(lot.get("move_card_no", "")).strip() != keyword:
+                move_cards = parse_move_cards(lot.get("move_card_no", ""))
+                if search_mode == "정확히 일치":
+                    matched_cards = [card for card in move_cards if card == keyword]
+                else:
+                    matched_cards = [card for card in move_cards if keyword_lower in card.lower()]
+
+                if not matched_cards:
                     continue
+
                 wo = wo_by_id.get(str(lot.get("work_order_id")))
                 if not wo:
                     continue
@@ -155,13 +238,15 @@ with st.sidebar.expander("🔍 이동카드번호 통합 검색", expanded=False
                         "LOT": lot.get("lot_key", ""),
                         "수량": lot.get("qty", ""),
                         "상태": lot.get("status", ""),
+                        "일치 이동카드": ", ".join(matched_cards),
+                        "전체 이동카드": merge_move_cards(move_cards),
                     }
                 )
             if not rows:
                 st.error("검색 결과가 없습니다.")
             else:
                 st.success(f"{len(rows)}건 발견")
-                st.dataframe(pd.DataFrame(rows), use_container_width=True, height=240)
+                st.dataframe(pd.DataFrame(rows), use_container_width=True, height=280)
 
 st.sidebar.divider()
 with st.sidebar.expander("📤 작업지시 등록 (엑셀 + PDF 선택)", expanded=True):
@@ -171,23 +256,47 @@ with st.sidebar.expander("📤 작업지시 등록 (엑셀 + PDF 선택)", expan
     if uploaded_excel:
         df = pd.read_excel(uploaded_excel)
         equip_col = detect_equipment_column(df)
-        lot_col = detect_lot_column(df)
-        qty_col = detect_qty_column(df, lot_col) if lot_col else None
-        move_col = detect_move_card_column(df)
+        lot_groups = build_lot_qty_move_groups(df)
 
         st.caption("자동 감지 결과")
         st.write(f"- 설비 컬럼: **{equip_col}**")
-        st.write(f"- LOT 컬럼: **{lot_col}**")
-        st.write(f"- 수량 컬럼: **{qty_col}**")
-        st.write(f"- 이동카드 컬럼: **{move_col}**")
+        if lot_groups:
+            st.write(f"- LOT/수량/이동카드 페어 수: **{len(lot_groups)}**")
+            for i, group in enumerate(lot_groups, start=1):
+                st.write(
+                    f"  · 페어{i}: LOT=`{group['lot_col']}`, 수량=`{group['qty_col']}`, 이동카드=`{group['move_col'] or '-'}`"
+                )
+        else:
+            st.write("- LOT/수량/이동카드 페어: **감지 실패**")
 
         ok = True
         if not equip_col:
             st.error("설비 컬럼을 찾지 못했습니다. 엑셀 내용을 확인해주세요.")
             ok = False
-        if not lot_col or not qty_col:
-            st.error("LOT/수량 컬럼을 찾지 못했습니다. 엑셀 내용을 확인해주세요.")
+        if not lot_groups:
+            st.error("LOT/수량 컬럼 페어를 찾지 못했습니다. 엑셀 내용을 확인해주세요.")
             ok = False
+
+        if ok:
+            extracted_rows = []
+            for _, row in df.iterrows():
+                for group in lot_groups:
+                    lot_key = row.get(group["lot_col"])
+                    qty = safe_int(row.get(group["qty_col"]), None)
+                    if pd.isna(lot_key) or qty is None:
+                        continue
+                    lot_key_value = str(lot_key).strip()
+                    if not lot_key_value:
+                        continue
+                    move = row.get(group["move_col"]) if group["move_col"] else ""
+                    extracted_rows.append({"lot_key": lot_key_value, "qty": qty, "move": move})
+
+            preview_df = pd.DataFrame(extracted_rows)
+            total_rows = len(preview_df)
+            unique_lots = preview_df["lot_key"].nunique() if total_rows else 0
+            duplicated_rows = max(total_rows - unique_lots, 0)
+            st.caption(f"업로드 미리보기: 유효 행 {total_rows}건 / 고유 LOT {unique_lots}건 / LOT 중복 행 {duplicated_rows}건")
+            st.info("같은 LOT가 여러 열/행에 있으면 수량은 합산되고 이동카드는 중복 제거 후 함께 저장됩니다.")
 
         if st.button("✅ 작업지시 등록", disabled=(not ok), use_container_width=True):
             excel_path = save_upload(uploaded_excel)
@@ -198,6 +307,7 @@ with st.sidebar.expander("📤 작업지시 등록 (엑셀 + PDF 선택)", expan
 
             created_at = now_str()
             registered = 0
+            total_registered_lots = 0
             for equip_raw, sub in df.groupby(equip_col):
                 equip = EQUIPMENT_MAP.get(str(equip_raw).strip())
                 if not equip:
@@ -216,24 +326,43 @@ with st.sidebar.expander("📤 작업지시 등록 (엑셀 + PDF 선택)", expan
                     }
                 )
 
+                lot_map: dict[str, dict] = {}
+
                 for _, row in sub.iterrows():
-                    lot_key = row.get(lot_col)
-                    qty = safe_int(row.get(qty_col), None)
-                    if pd.isna(lot_key) or qty is None:
-                        continue
-                    move = row.get(move_col) if move_col else ""
-                    move_value = "" if pd.isna(move) else str(move)
+                    for group in lot_groups:
+                        lot_key = row.get(group["lot_col"])
+                        qty = safe_int(row.get(group["qty_col"]), None)
+                        if pd.isna(lot_key) or qty is None:
+                            continue
+
+                        lot_key_value = str(lot_key).strip()
+                        if not lot_key_value:
+                            continue
+
+                        move = row.get(group["move_col"]) if group["move_col"] else ""
+                        lot_data = lot_map.setdefault(
+                            lot_key_value,
+                            {
+                                "qty": 0,
+                                "move_cards": [],
+                            },
+                        )
+                        lot_data["qty"] += qty
+                        lot_data["move_cards"].extend(parse_move_cards(move))
+
+                for lot_key_value, lot_data in lot_map.items():
                     insert_lot(
                         {
                             "id": next_lot_id,
                             "work_order_id": new_wo_id,
-                            "lot_key": str(lot_key),
-                            "qty": qty,
-                            "move_card_no": move_value,
+                            "lot_key": lot_key_value,
+                            "qty": lot_data["qty"],
+                            "move_card_no": merge_move_cards(lot_data["move_cards"]),
                             "status": "WAITING",
                             "done_at": "",
                         }
                     )
+                    total_registered_lots += 1
                     next_lot_id += 1
 
                 append_ledger("UPLOAD", "system", new_wo_id, "", f"excel={uploaded_excel.name}")
@@ -242,7 +371,7 @@ with st.sidebar.expander("📤 작업지시 등록 (엑셀 + PDF 선택)", expan
                 registered += 1
                 new_wo_id += 1
 
-            st.success(f"작업지시 등록 완료 ({registered}건)")
+            st.success(f"작업지시 등록 완료 (작업지시 {registered}건 / 원장 {total_registered_lots}건)")
             st.rerun()
 
 
@@ -378,7 +507,7 @@ for idx, equip in enumerate(EQUIP_TABS):
                 for lot in pending_lots:
                     lot_key = str(lot.get("lot_key", ""))
                     qty = safe_int(lot.get("qty"), 0)
-                    move = str(lot.get("move_card_no", "")).strip()
+                    move = format_move_cards_for_display(lot.get("move_card_no", ""))
                     body = dedent(f"""
                     <div style='display:flex; gap:20px; justify-content:space-between; flex-wrap:wrap;'>
                       <div style='min-width:180px;'>
@@ -391,7 +520,7 @@ for idx, equip in enumerate(EQUIP_TABS):
                       </div>
                       <div style='min-width:220px;'>
                         <div style='font-size:14px; color:#6b7280; border-bottom:1px solid #e5e7eb; padding-bottom:4px;'>이동카드</div>
-                        <div style='font-size:24px; font-weight:800; margin-top:8px;'>{escape(move if move else '-')}</div>
+                        <div style='font-size:24px; font-weight:800; margin-top:8px; white-space:pre-line;'>{escape(move)}</div>
                       </div>
                     </div>
                     """).strip()
@@ -418,7 +547,7 @@ for idx, equip in enumerate(EQUIP_TABS):
                     lc1.write(f"**{lot.get('lot_key', '')}**")
                     lc2.write(lot.get("qty", ""))
                     lc3.write(f"`{lot.get('status', '')}`")
-                    lc4.write(str(lot.get("move_card_no", "")))
+                    lc4.write(format_move_cards_for_display(lot.get("move_card_no", "")))
 
                     if wo_status == "VOID":
                         lc5.write("—")
