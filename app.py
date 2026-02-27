@@ -135,6 +135,54 @@ def detect_move_card_column(df):
     return None
 
 
+def detect_lot_columns(df) -> list[str]:
+    cols = []
+    for col in df.columns:
+        sample = df[col].dropna().astype(str).head(80)
+        if sample.str.contains(r"\d+T-", regex=True).any():
+            cols.append(col)
+    return cols
+
+
+def detect_move_card_columns(df) -> list[str]:
+    pattern = r"C\d{6}-\d+"
+    cols = []
+    for col in df.columns:
+        sample = df[col].dropna().astype(str).head(100)
+        if sample.str.contains(pattern, regex=True).any():
+            cols.append(col)
+    return cols
+
+
+def build_lot_qty_move_groups(df) -> list[dict]:
+    cols = list(df.columns)
+    col_index = {col: i for i, col in enumerate(cols)}
+    lot_cols = detect_lot_columns(df)
+    move_cols = detect_move_card_columns(df)
+
+    groups = []
+    used_move_cols = set()
+    for lot_col in lot_cols:
+        qty_col = detect_qty_column(df, lot_col)
+        lot_idx = col_index[lot_col]
+
+        candidate_moves = [
+            m for m in move_cols
+            if col_index[m] > lot_idx and m not in used_move_cols
+        ]
+        if not candidate_moves:
+            candidate_moves = [m for m in move_cols if m not in used_move_cols]
+
+        move_col = None
+        if candidate_moves:
+            move_col = min(candidate_moves, key=lambda m: abs(col_index[m] - lot_idx))
+            used_move_cols.add(move_col)
+
+        groups.append({"lot_col": lot_col, "qty_col": qty_col, "move_col": move_col})
+
+    return [g for g in groups if g["qty_col"]]
+
+
 def save_upload(uploaded_file, prefix=""):
     filename = f"{prefix}{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uploaded_file.name}"
     path = os.path.join(UPLOAD_DIR, filename)
@@ -208,22 +256,25 @@ with st.sidebar.expander("📤 작업지시 등록 (엑셀 + PDF 선택)", expan
     if uploaded_excel:
         df = pd.read_excel(uploaded_excel)
         equip_col = detect_equipment_column(df)
-        lot_col = detect_lot_column(df)
-        qty_col = detect_qty_column(df, lot_col) if lot_col else None
-        move_col = detect_move_card_column(df)
+        lot_groups = build_lot_qty_move_groups(df)
 
         st.caption("자동 감지 결과")
         st.write(f"- 설비 컬럼: **{equip_col}**")
-        st.write(f"- LOT 컬럼: **{lot_col}**")
-        st.write(f"- 수량 컬럼: **{qty_col}**")
-        st.write(f"- 이동카드 컬럼: **{move_col}**")
+        if lot_groups:
+            st.write(f"- LOT/수량/이동카드 페어 수: **{len(lot_groups)}**")
+            for i, group in enumerate(lot_groups, start=1):
+                st.write(
+                    f"  · 페어{i}: LOT=`{group['lot_col']}`, 수량=`{group['qty_col']}`, 이동카드=`{group['move_col'] or '-'}`"
+                )
+        else:
+            st.write("- LOT/수량/이동카드 페어: **감지 실패**")
 
         ok = True
         if not equip_col:
             st.error("설비 컬럼을 찾지 못했습니다. 엑셀 내용을 확인해주세요.")
             ok = False
-        if not lot_col or not qty_col:
-            st.error("LOT/수량 컬럼을 찾지 못했습니다. 엑셀 내용을 확인해주세요.")
+        if not lot_groups:
+            st.error("LOT/수량 컬럼 페어를 찾지 못했습니다. 엑셀 내용을 확인해주세요.")
             ok = False
 
         if ok:
