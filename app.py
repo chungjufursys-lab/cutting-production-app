@@ -12,13 +12,15 @@ from google.oauth2.service_account import Credentials
 st.set_page_config(page_title="재단공정 작업관리", layout="wide")
 st.title("재단공정 작업관리 시스템")
 
+SPREADSHEET_ID = "1c810UADSZThIRKuOqyKQzkt5BmVLljgKcevTqFQaN0g"
+
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 EQUIP_TABS = ["1호기", "2호기", "네스팅", "6호기", "곡면"]
 
 # =====================================================
-# Google Sheets 연결
+# Google Sheets 연결 (open_by_key 사용)
 # =====================================================
 @st.cache_resource
 def connect_gsheet():
@@ -30,7 +32,9 @@ def connect_gsheet():
         scopes=scope,
     )
     client = gspread.authorize(creds)
-    spreadsheet = client.open("cutting-production-db")
+
+    spreadsheet = client.open_by_key(SPREADSHEET_ID)
+
     return spreadsheet.worksheet("work_orders"), spreadsheet.worksheet("lots")
 
 ws_work, ws_lots = connect_gsheet()
@@ -53,7 +57,11 @@ cleanup_files(10)
 # 안전 로딩 함수
 # =====================================================
 def load_ws(ws, required_cols):
-    data = ws.get_all_values()
+    try:
+        data = ws.get_all_values()
+    except Exception as e:
+        st.error(f"시트 로딩 실패: {e}")
+        st.stop()
 
     if not data:
         return pd.DataFrame(columns=required_cols)
@@ -239,7 +247,7 @@ for i, equip in enumerate(EQUIP_TABS):
         with right:
             wo = work_df[work_df["id"] == selected].iloc[0]
 
-            if wo["excel_file_path"]:
+            if wo["excel_file_path"] and os.path.exists(wo["excel_file_path"]):
                 with open(wo["excel_file_path"], "rb") as f:
                     st.download_button("📥 원본 엑셀 다운로드", f, file_name=wo["file_name"])
 
