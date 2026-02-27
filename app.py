@@ -1,4 +1,3 @@
-import os
 import hashlib
 from datetime import datetime
 import pandas as pd
@@ -6,10 +5,7 @@ import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
 
-from services.drive_service import (
-    upload_pdf_to_drive,
-    generate_drive_link
-)
+from services.drive_service import upload_file, generate_link, cleanup_old_files
 
 # =========================
 # 기본 설정
@@ -53,8 +49,38 @@ def next_id(df):
         return 1
     return int(max(df["id"])) + 1
 
+def update_status(work_df, lots_df):
+    for idx, row in work_df.iterrows():
+        wid = row["id"]
+        wlots = lots_df[lots_df["work_order_id"] == wid]
+
+        if row["status"] == "VOID":
+            continue
+
+        if wlots.empty:
+            continue
+
+        total = len(wlots)
+        done = len(wlots[wlots["status"] == "DONE"])
+
+        if done == 0:
+            new_status = "WAITING"
+        elif done < total:
+            new_status = "IN_PROGRESS"
+        else:
+            new_status = "COMPLETED"
+
+        if new_status != row["status"]:
+            cell = ws_work.find(str(wid))
+            ws_work.update_cell(cell.row, 4, new_status)
+
 # =========================
-# 좌측 업로드 영역
+# 10일 자동 정리
+# =========================
+cleanup_old_files(10)
+
+# =========================
+# 업로드 영역
 # =========================
 st.sidebar.header("📤 작업지시 업로드")
 
@@ -70,16 +96,29 @@ if st.sidebar.button("업로드 실행"):
     work_df = load_ws(ws_work)
     new_work_id = next_id(work_df)
 
-    # PDF 처리 (선택)
-    file_id = ""
-    if pdf_file is not None:
-        pdf_bytes = pdf_file.getbuffer()
-        drive_filename = f"WO_{new_work_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-        file_id = upload_pdf_to_drive(pdf_bytes, drive_filename)
+    file_hash = hashlib.md5(excel_file.getbuffer()).hexdigest()
 
-    # 엑셀 처리
+    if "file_hash" in work_df.columns:
+        if file_hash in work_df["file_hash"].astype(str).tolist():
+            st.sidebar.error("이미 등록된 파일입니다.")
+            st.stop()
+
+    # 엑셀 Drive 업로드
+    excel_id = upload_file(
+        excel_file.getbuffer(),
+        f"WO_{new_work_id}_{excel_file.name}",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+    pdf_id = ""
+    if pdf_file:
+        pdf_id = upload_file(
+            pdf_file.getbuffer(),
+            f"WO_{new_work_id}_move.pdf",
+            "application/pdf"
+        )
+
     df = pd.read_excel(excel_file)
-
     equipment = str(df.iloc[0, 0]).strip()
 
     ws_work.append_row([
@@ -88,12 +127,13 @@ if st.sidebar.button("업로드 실행"):
         equipment,
         "WAITING",
         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "",
-        file_id
+        file_hash,
+        excel_id,
+        pdf_id
     ])
 
-    lot_df = load_ws(ws_lots)
-    lot_id = next_id(lot_df)
+    lots_df = load_ws(ws_lots)
+    lot_id = next_id(lots_df)
 
     for _, r in df.iterrows():
         lot_key = r.iloc[0]
@@ -115,7 +155,7 @@ if st.sidebar.button("업로드 실행"):
     st.rerun()
 
 # =========================
-# 설비 탭
+# 설비 탭 UI 복원
 # =========================
 tabs = st.tabs(EQUIP_TABS)
 
@@ -125,19 +165,30 @@ for i, equip in enumerate(EQUIP_TABS):
         work_df = load_ws(ws_work)
         lots_df = load_ws(ws_lots)
 
-        if work_df.empty:
+        update_status(work_df, lots_df)
+
+        show_completed = st.checkbox("완료 포함", key=f"comp_{equip}")
+        show_void = st.checkbox("취소 포함", key=f"void_{equip}")
+
+        filtered = work_df[work_df["equipment"] == equip]
+
+        if not show_completed:
+            filtered = filtered[filtered["status"] != "COMPLETED"]
+        if not show_void:
+            filtered = filtered[filtered["status"] != "VOID"]
+
+        if filtered.empty:
             st.info("작업지시 없음")
             continue
 
-        filtered = work_df[
-            (work_df["equipment"] == equip) &
-            (work_df["status"] != "COMPLETED") &
-            (work_df["status"] != "VOID")
-        ]
+        # KPI
+        equip_lots = lots_df[lots_df["work_order_id"].isin(filtered["id"])]
+        unfinished = len(equip_lots[equip_lots["status"] == "WAITING"])
+        today_done = len(equip_lots[equip_lots["status"] == "DONE"])
 
-        if filtered.empty:
-            st.info("해당 설비 작업 없음")
-            continue
+        c1, c2 = st.columns(2)
+        c1.metric("미완료 원장", unfinished)
+        c2.metric("완료 원장", today_done)
 
         left, right = st.columns([1,2])
 
@@ -145,54 +196,36 @@ for i, equip in enumerate(EQUIP_TABS):
             selected = st.radio(
                 "작업지시 선택",
                 filtered["id"].tolist(),
-                format_func=lambda x: f"WO {x}"
+                format_func=lambda x: f"{x} | {filtered[filtered['id']==x]['status'].iloc[0]}"
             )
 
         with right:
             wo = work_df[work_df["id"] == selected].iloc[0]
-            pdf_id = wo.get("pdf_drive_file_id", "")
 
-            st.subheader("📎 이동카드")
+            st.link_button("📥 원본 엑셀 다운로드",
+                           generate_link(wo["excel_drive_file_id"]))
 
-            # PDF 없을 경우 → 추가 가능
-            if not pdf_id:
-                new_pdf = st.file_uploader("PDF 추가 업로드", type=["pdf"], key=f"addpdf_{selected}")
-                if new_pdf:
-                    new_file_id = upload_pdf_to_drive(
-                        new_pdf.getbuffer(),
-                        f"WO_{selected}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-                    )
-                    cell = ws_work.find(str(selected))
-                    ws_work.update_cell(cell.row, work_df.columns.get_loc("pdf_drive_file_id")+1, new_file_id)
-                    st.success("PDF 등록 완료")
-                    st.rerun()
-            else:
-                link = generate_drive_link(pdf_id)
-                st.link_button("📎 이동카드 열기", link)
-
-                replace_pdf = st.file_uploader("PDF 교체", type=["pdf"], key=f"reppdf_{selected}")
-                if replace_pdf:
-                    new_file_id = upload_pdf_to_drive(
-                        replace_pdf.getbuffer(),
-                        f"WO_{selected}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-                    )
-                    cell = ws_work.find(str(selected))
-                    ws_work.update_cell(cell.row, work_df.columns.get_loc("pdf_drive_file_id")+1, new_file_id)
-                    st.success("PDF 교체 완료")
-                    st.rerun()
+            if wo["pdf_drive_file_id"]:
+                st.link_button("📎 이동카드 열기",
+                               generate_link(wo["pdf_drive_file_id"]))
 
             st.divider()
 
-            st.subheader("원장 목록")
             wlots = lots_df[lots_df["work_order_id"] == selected]
 
             for _, r in wlots.iterrows():
-                c1, c2 = st.columns([3,1])
+                c1, c2, c3 = st.columns([3,1,1])
                 c1.write(r["lot_key"])
                 c2.write(r["status"])
 
+                if r["status"] == "WAITING":
+                    if c3.button("완료", key=f"d_{r['id']}"):
+                        cell = ws_lots.find(str(r["id"]))
+                        ws_lots.update_cell(cell.row, 6, "DONE")
+                        st.rerun()
+
 # =========================
-# 이동카드 검색 (좌측 하단)
+# 이동카드 검색
 # =========================
 st.sidebar.divider()
 st.sidebar.header("🔍 이동카드 검색")
@@ -200,24 +233,21 @@ st.sidebar.header("🔍 이동카드 검색")
 search_key = st.sidebar.text_input("이동카드번호 입력")
 
 if st.sidebar.button("검색"):
-    if search_key.strip() == "":
-        st.sidebar.warning("번호 입력 필요")
+    lots_df = load_ws(ws_lots)
+    work_df = load_ws(ws_work)
+
+    result = lots_df[lots_df["move_card_no"] == search_key.strip()]
+
+    if result.empty:
+        st.error("검색 결과 없음")
     else:
-        lots_df = load_ws(ws_lots)
-        work_df = load_ws(ws_work)
-
-        result = lots_df[lots_df["move_card_no"] == search_key.strip()]
-
-        if result.empty:
-            st.error("검색 결과 없음")
-        else:
-            merged = result.merge(
-                work_df,
-                left_on="work_order_id",
-                right_on="id",
-                how="left"
-            )
-            st.dataframe(
-                merged[["equipment", "file_name", "lot_key", "status"]],
-                use_container_width=True
-            )
+        merged = result.merge(
+            work_df,
+            left_on="work_order_id",
+            right_on="id",
+            how="left"
+        )
+        st.dataframe(
+            merged[["equipment", "file_name", "lot_key", "status"]],
+            use_container_width=True
+        )
