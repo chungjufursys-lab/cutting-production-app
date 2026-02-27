@@ -1,9 +1,3 @@
- (cd "$(git rev-parse --show-toplevel)" && git apply --3way <<'EOF' 
-diff --git a/sheets_db.py b/sheets_db.py
-index 9b1e0858169c04abf1b88f28dd1a528c79a26efb..55d0c4f8ac26570c0e3ac056279c04e2c4fbde80 100644
---- a/sheets_db.py
-+++ b/sheets_db.py
-@@ -1,151 +1,165 @@
  import time
 -import streamlit as st
 +from datetime import datetime
