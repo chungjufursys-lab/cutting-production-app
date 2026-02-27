@@ -21,155 +21,116 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 EQUIP_TABS = ["1호기", "2호기", "네스팅", "6호기", "곡면"]
 
 # =====================================================
-# 안전한 Google Sheets 연결
+# 업로드 UI (항상 먼저 표시)
 # =====================================================
-@st.cache_resource
-def connect_gsheet():
-    try:
-        scope = ["https://www.googleapis.com/auth/spreadsheets"]
-        creds = Credentials.from_service_account_info(
-            st.secrets["gcp_service_account"],
-            scopes=scope,
-        )
-        client = gspread.authorize(creds)
-        spreadsheet = client.open_by_key(SPREADSHEET_ID)
-        return spreadsheet
-    except KeyError:
-        st.error("🔐 서비스계정 키(secrets) 설정이 올바르지 않습니다.")
-        st.stop()
-    except APIError:
-        st.error("📡 Google Sheets 접근 실패.\n시트 공유 또는 API 활성화를 확인하세요.")
-        st.stop()
-    except Exception as e:
-        st.error(f"❗ Google 연결 오류: {e}")
-        st.stop()
+st.sidebar.header("📤 작업지시 업로드")
 
-spreadsheet = connect_gsheet()
+excel_file = st.sidebar.file_uploader("ERP 엑셀 업로드 (필수)", type=["xlsx"])
+pdf_file = st.sidebar.file_uploader("이동카드 PDF (선택)", type=["pdf"])
+upload_clicked = st.sidebar.button("업로드 실행")
 
+# =====================================================
+# Google Sheets 연결 (실패해도 업로드는 보이도록 try 처리)
+# =====================================================
 try:
+    scope = ["https://www.googleapis.com/auth/spreadsheets"]
+    creds = Credentials.from_service_account_info(
+        st.secrets["gcp_service_account"],
+        scopes=scope,
+    )
+    client = gspread.authorize(creds)
+    spreadsheet = client.open_by_key(SPREADSHEET_ID)
     ws_work = spreadsheet.worksheet("work_orders")
     ws_lots = spreadsheet.worksheet("lots")
-except Exception:
-    st.error("📄 work_orders 또는 lots 시트를 찾을 수 없습니다.")
-    st.stop()
+    sheet_connected = True
+except Exception as e:
+    sheet_connected = False
+    st.error("📡 Google Sheets 연결 실패")
+    st.warning("시트 연결이 안 되어도 업로드 UI는 표시됩니다.")
+    st.write(str(e))
 
 # =====================================================
-# 파일 자동 정리
+# 업로드 실행
 # =====================================================
-def cleanup_files(days=10):
+if upload_clicked:
+
+    if not sheet_connected:
+        st.sidebar.error("시트 연결 실패 상태에서는 업로드할 수 없습니다.")
+        st.stop()
+
+    if excel_file is None:
+        st.sidebar.error("엑셀은 필수입니다.")
+        st.stop()
+
     try:
-        now = datetime.now()
-        for file in os.listdir(UPLOAD_DIR):
-            path = os.path.join(UPLOAD_DIR, file)
-            if os.path.isfile(path):
-                created = datetime.fromtimestamp(os.path.getctime(path))
-                if now - created > timedelta(days=days):
-                    os.remove(path)
-    except Exception:
-        pass
-
-cleanup_files(10)
-
-# =====================================================
-# 안전 로딩
-# =====================================================
-def load_ws(ws):
-    try:
-        data = ws.get_all_values()
+        work_data = ws_work.get_all_values()
+        lots_data = ws_lots.get_all_values()
     except APIError:
-        st.error("📡 Google Sheets 호출 제한 초과 또는 네트워크 오류입니다.\n잠시 후 다시 시도하세요.")
-        st.stop()
-    except Exception as e:
-        st.error(f"❗ 시트 로딩 중 오류: {e}")
+        st.sidebar.error("Google API 호출 제한 초과. 잠시 후 다시 시도하세요.")
         st.stop()
 
-    if not data:
-        return pd.DataFrame()
+    work_df = pd.DataFrame(work_data[1:], columns=work_data[0]) if len(work_data) > 1 else pd.DataFrame(columns=work_data[0])
+    lots_df = pd.DataFrame(lots_data[1:], columns=lots_data[0]) if len(lots_data) > 1 else pd.DataFrame(columns=lots_data[0])
 
-    header = data[0]
-    if len(data) == 1:
-        return pd.DataFrame(columns=header)
+    new_work_id = 1 if work_df.empty else int(pd.to_numeric(work_df["id"]).max()) + 1
 
-    df = pd.DataFrame(data[1:], columns=header)
-
-    try:
-        if "id" in df.columns:
-            df["id"] = pd.to_numeric(df["id"], errors="coerce")
-        if "work_order_id" in df.columns:
-            df["work_order_id"] = pd.to_numeric(df["work_order_id"], errors="coerce")
-    except Exception:
-        st.error("📊 시트 데이터 형식 오류 (숫자 변환 실패)")
+    file_hash = hashlib.md5(excel_file.getbuffer()).hexdigest()
+    if not work_df.empty and file_hash in work_df["file_hash"].astype(str).tolist():
+        st.sidebar.error("이미 등록된 파일입니다.")
         st.stop()
 
-    return df
+    # 파일 저장
+    excel_path = os.path.join(UPLOAD_DIR, f"WO_{new_work_id}_{excel_file.name}")
+    with open(excel_path, "wb") as f:
+        f.write(excel_file.getbuffer())
 
-work_df = load_ws(ws_work)
-lots_df = load_ws(ws_lots)
+    pdf_path = ""
+    if pdf_file:
+        pdf_path = os.path.join(UPLOAD_DIR, f"WO_{new_work_id}_move.pdf")
+        with open(pdf_path, "wb") as f:
+            f.write(pdf_file.getbuffer())
+
+    ws_work.append_row([
+        new_work_id,
+        excel_file.name,
+        "미분류",
+        "WAITING",
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        file_hash,
+        excel_path,
+        pdf_path
+    ])
+
+    st.sidebar.success("업로드 완료")
+    st.rerun()
 
 # =====================================================
-# 설비 탭 UI
+# 탭 UI (시트 연결 성공 시에만 표시)
 # =====================================================
-tabs = st.tabs(EQUIP_TABS)
+if sheet_connected:
 
-for i, equip in enumerate(EQUIP_TABS):
-    with tabs[i]:
+    work_df = pd.DataFrame(ws_work.get_all_values()[1:], columns=ws_work.get_all_values()[0])
+    lots_df = pd.DataFrame(ws_lots.get_all_values()[1:], columns=ws_lots.get_all_values()[0])
 
-        try:
+    tabs = st.tabs(EQUIP_TABS)
+
+    for i, equip in enumerate(EQUIP_TABS):
+        with tabs[i]:
+
+            if "equipment" not in work_df.columns:
+                st.warning("work_orders 시트에 equipment 컬럼이 없습니다.")
+                continue
+
             filtered = work_df[work_df["equipment"] == equip]
-        except KeyError:
-            st.error("📄 work_orders 시트에 'equipment' 컬럼이 없습니다.")
-            continue
 
-        if filtered.empty:
-            st.info("작업지시 없음")
-            continue
+            if filtered.empty:
+                st.info("작업지시 없음")
+                continue
 
-        left, right = st.columns([1, 2])
-
-        with left:
             selected = st.radio(
                 "작업지시 선택",
                 filtered["id"].tolist(),
                 format_func=lambda x: f"{x} | {filtered[filtered['id']==x]['file_name'].iloc[0]}"
             )
 
-        with right:
-            wo = work_df[work_df["id"] == selected].iloc[0]
-
-            st.markdown("### 📁 파일 관리")
-            c1, c2 = st.columns(2)
-
-            with c1:
-                path = wo.get("excel_file_path", "")
-                if path and os.path.exists(path):
-                    with open(path, "rb") as f:
-                        st.download_button(
-                            "📥 원본 엑셀 다운로드",
-                            f,
-                            file_name=wo["file_name"],
-                            use_container_width=True
-                        )
-                else:
-                    st.warning("엑셀 파일이 서버에 존재하지 않습니다.\n(10일 경과 삭제 가능)")
-
-            with c2:
-                path = wo.get("pdf_file_path", "")
-                if path and os.path.exists(path):
-                    with open(path, "rb") as f:
-                        st.download_button(
-                            "📎 이동카드 다운로드",
-                            f,
-                            file_name="move_card.pdf",
-                            use_container_width=True
-                        )
-                else:
-                    st.info("이동카드가 등록되지 않았습니다.")
-
-            st.divider()
-
-            wlots = lots_df[lots_df["work_order_id"] == selected]
-
-            for _, r in wlots.iterrows():
-                c1, c2 = st.columns([4,1])
-                c1.write(r.get("lot_key", ""))
-                c2.write(r.get("status", ""))
+            st.write("작업지시 상세 표시 영역")
