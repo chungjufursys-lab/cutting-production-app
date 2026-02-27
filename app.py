@@ -1,17 +1,19 @@
+import os
 import hashlib
-from datetime import datetime
+from datetime import datetime, timedelta
 import pandas as pd
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
-
-from services.drive_service import upload_file, generate_link, cleanup_old_files
 
 # =====================================================
 # 기본 설정
 # =====================================================
 st.set_page_config(page_title="재단공정 작업관리", layout="wide")
 st.title("재단공정 작업관리 시스템")
+
+UPLOAD_DIR = "uploads"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 EQUIP_TABS = ["1호기", "2호기", "네스팅", "6호기", "곡면"]
 
@@ -22,7 +24,6 @@ EQUIP_TABS = ["1호기", "2호기", "네스팅", "6호기", "곡면"]
 def connect_gsheet():
     scope = [
         "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
     ]
     creds = Credentials.from_service_account_info(
         st.secrets["gcp_service_account"],
@@ -35,14 +36,24 @@ def connect_gsheet():
 ws_work, ws_lots = connect_gsheet()
 
 # =====================================================
-# 안전 로딩 함수 (데이터 0건이어도 컬럼 유지)
+# 10일 파일 자동 삭제
+# =====================================================
+def cleanup_files(days=10):
+    now = datetime.now()
+    for file in os.listdir(UPLOAD_DIR):
+        path = os.path.join(UPLOAD_DIR, file)
+        if os.path.isfile(path):
+            created = datetime.fromtimestamp(os.path.getctime(path))
+            if now - created > timedelta(days=days):
+                os.remove(path)
+
+cleanup_files(10)
+
+# =====================================================
+# 안전 로딩 함수
 # =====================================================
 def load_ws(ws, required_cols):
-    try:
-        data = ws.get_all_values()
-    except Exception as e:
-        st.error(f"시트 로딩 실패: {e}")
-        st.stop()
+    data = ws.get_all_values()
 
     if not data:
         return pd.DataFrame(columns=required_cols)
@@ -83,7 +94,6 @@ def update_status(work_df, lots_df):
             continue
 
         wlots = lots_df[lots_df["work_order_id"] == wid]
-
         if wlots.empty:
             continue
 
@@ -102,11 +112,6 @@ def update_status(work_df, lots_df):
             ws_work.update_cell(cell.row, 4, new_status)
 
 # =====================================================
-# Drive 10일 자동 정리
-# =====================================================
-cleanup_old_files(10)
-
-# =====================================================
 # 업로드 영역
 # =====================================================
 st.sidebar.header("📤 작업지시 업로드")
@@ -123,7 +128,7 @@ if st.sidebar.button("업로드 실행"):
     work_df = load_ws(ws_work, [
         "id","file_name","equipment","status",
         "created_at","file_hash",
-        "excel_drive_file_id","pdf_drive_file_id"
+        "excel_file_path","pdf_file_path"
     ])
 
     new_work_id = next_id(work_df)
@@ -133,20 +138,18 @@ if st.sidebar.button("업로드 실행"):
         st.sidebar.error("이미 등록된 파일입니다.")
         st.stop()
 
-    # 엑셀 Drive 업로드
-    excel_id = upload_file(
-        excel_file.getbuffer(),
-        f"WO_{new_work_id}_{excel_file.name}",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+    # 엑셀 저장
+    excel_filename = f"WO_{new_work_id}_{excel_file.name}"
+    excel_path = os.path.join(UPLOAD_DIR, excel_filename)
+    with open(excel_path, "wb") as f:
+        f.write(excel_file.getbuffer())
 
-    pdf_id = ""
+    pdf_path = ""
     if pdf_file:
-        pdf_id = upload_file(
-            pdf_file.getbuffer(),
-            f"WO_{new_work_id}_move.pdf",
-            "application/pdf"
-        )
+        pdf_filename = f"WO_{new_work_id}_move.pdf"
+        pdf_path = os.path.join(UPLOAD_DIR, pdf_filename)
+        with open(pdf_path, "wb") as f:
+            f.write(pdf_file.getbuffer())
 
     df = pd.read_excel(excel_file)
     equipment = str(df.iloc[0, 0]).strip()
@@ -158,8 +161,8 @@ if st.sidebar.button("업로드 실행"):
         "WAITING",
         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         file_hash,
-        excel_id,
-        pdf_id
+        excel_path,
+        pdf_path
     ])
 
     lots_df = load_ws(ws_lots, [
@@ -199,7 +202,7 @@ for i, equip in enumerate(EQUIP_TABS):
         work_df = load_ws(ws_work, [
             "id","file_name","equipment","status",
             "created_at","file_hash",
-            "excel_drive_file_id","pdf_drive_file_id"
+            "excel_file_path","pdf_file_path"
         ])
 
         lots_df = load_ws(ws_lots, [
@@ -236,12 +239,13 @@ for i, equip in enumerate(EQUIP_TABS):
         with right:
             wo = work_df[work_df["id"] == selected].iloc[0]
 
-            st.link_button("📥 원본 엑셀 다운로드",
-                           generate_link(wo["excel_drive_file_id"]))
+            if wo["excel_file_path"]:
+                with open(wo["excel_file_path"], "rb") as f:
+                    st.download_button("📥 원본 엑셀 다운로드", f, file_name=wo["file_name"])
 
-            if wo["pdf_drive_file_id"]:
-                st.link_button("📎 이동카드 열기",
-                               generate_link(wo["pdf_drive_file_id"]))
+            if wo["pdf_file_path"] and os.path.exists(wo["pdf_file_path"]):
+                with open(wo["pdf_file_path"], "rb") as f:
+                    st.download_button("📎 이동카드 다운로드", f, file_name="move.pdf")
 
             st.divider()
 
@@ -274,7 +278,7 @@ if st.sidebar.button("검색"):
     work_df = load_ws(ws_work, [
         "id","file_name","equipment","status",
         "created_at","file_hash",
-        "excel_drive_file_id","pdf_drive_file_id"
+        "excel_file_path","pdf_file_path"
     ])
 
     result = lots_df[lots_df["move_card_no"] == search_key.strip()]
