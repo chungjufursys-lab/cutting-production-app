@@ -223,7 +223,6 @@ def build_lot_qty_move_groups(df) -> list[dict]:
 def collect_lot_entries(df: pd.DataFrame, lot_groups: list[dict]) -> list[dict]:
     entries: list[dict] = []
     for _, row in df.iterrows():
-        row_seen: set[tuple[str, int, tuple[str, ...]]] = set()
         for group in lot_groups:
             lot_col = group["lot_col"]
             qty_col = group["qty_col"]
@@ -239,17 +238,11 @@ def collect_lot_entries(df: pd.DataFrame, lot_groups: list[dict]) -> list[dict]:
                 continue
 
             move_raw = row.get(move_col) if move_col else ""
-            move_cards = parse_move_cards(move_raw)
-            dedup_key = (lot_key_value, qty, tuple(move_cards))
-            if dedup_key in row_seen:
-                continue
-            row_seen.add(dedup_key)
-
             entries.append(
                 {
                     "lot_key": lot_key_value,
                     "qty": qty,
-                    "move_cards": move_cards,
+                    "move_cards": parse_move_cards(move_raw),
                 }
             )
     return entries
