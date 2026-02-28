@@ -458,13 +458,13 @@ for idx, equip in enumerate(EQUIP_TABS):
     with tabs[idx]:
         c1, c2, c3, c4 = st.columns([1.3, 1, 1, 2])
         with c1:
-            worker_mode = st.toggle("🧤 작업자 모드", value=True, key=f"worker_{equip}")
+            worker_mode = st.toggle("🧤 작업자 모드", value=False, key=f"worker_{equip}")
         with c2:
             show_completed = st.checkbox("완료 포함", value=False, key=f"comp_{equip}")
         with c3:
             show_void = st.checkbox("취소 포함", value=False, key=f"void_{equip}")
         with c4:
-            st.caption("작업자 모드 ON + 미완료 기본 표시")
+            st.caption("기본: 관리자 모드 / 필요 시 작업자 모드 전환")
 
         equip_wos = [w for w in ALL_WOS if w.get("equipment") == equip]
         if not show_void:
@@ -620,18 +620,17 @@ for idx, equip in enumerate(EQUIP_TABS):
 
                 for lot in lots:
                     lot_id = lot.get("id")
-                    lc1, lc2, lc3, lc4, lc5 = st.columns([4.5, 1, 1.2, 2.2, 1.5])
+                    lc1, lc2, lc3, lc4 = st.columns([6, 1.2, 1.5, 1.8])
                     lc1.write(f"**{lot.get('lot_key', '')}**")
                     lc2.write(lot.get("qty", ""))
                     lc3.write(f"`{lot.get('status', '')}`")
-                    lc4.write(format_move_cards_for_display(lot.get("move_card_no", "")))
 
                     if wo_status == "VOID":
-                        lc5.write("—")
+                        lc4.write("—")
                         continue
 
                     if lot.get("status") == "WAITING":
-                        if lc5.button("완료", key=f"admin_done_{equip}_{selected_id}_{lot_id}"):
+                        if lc4.button("완료", key=f"admin_done_{equip}_{selected_id}_{lot_id}"):
                             update_lot_status(lot_id, "DONE")
                             lot_preview = [
                                 dict(x, status=("DONE" if str(x.get("id")) == str(lot_id) else x.get("status")))
@@ -642,7 +641,7 @@ for idx, equip in enumerate(EQUIP_TABS):
                             append_ledger("DONE", "system", selected_id, lot_id, "")
                             st.rerun()
                     else:
-                        if lc5.button("완료취소", key=f"admin_undo_{equip}_{selected_id}_{lot_id}"):
+                        if lc4.button("완료취소", key=f"admin_undo_{equip}_{selected_id}_{lot_id}"):
                             update_lot_status(lot_id, "WAITING")
                             lot_preview = [
                                 dict(x, status=("WAITING" if str(x.get("id")) == str(lot_id) else x.get("status")))
