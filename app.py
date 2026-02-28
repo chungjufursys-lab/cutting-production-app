@@ -412,10 +412,13 @@ with st.sidebar.expander("📤 작업지시 등록 (엑셀 + PDF 선택)", expan
                         lot_key_value,
                         {
                             "qty": 0,
+                            "qty_candidates": set(),
                             "move_cards": [],
                         },
                     )
-                    lot_data["qty"] += entry["qty"]
+                    lot_data["qty_candidates"].add(entry["qty"])
+                    # 동일 LOT가 이동카드 개수만큼 반복되는 템플릿을 고려해 수량은 합산하지 않고 대표값(최대값) 사용
+                    lot_data["qty"] = max(lot_data["qty_candidates"])
 
                     for card in entry["move_cards"]:
                         owner = move_card_owner.get(card)
