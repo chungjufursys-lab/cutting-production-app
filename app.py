@@ -404,6 +404,7 @@ with st.sidebar.expander("📤 작업지시 등록 (엑셀 + PDF 선택)", expan
                 )
 
                 lot_map: dict[str, dict] = {}
+                move_card_owner: dict[str, str] = {}
 
                 for entry in collect_lot_entries(sub, lot_groups):
                     lot_key_value = entry["lot_key"]
@@ -415,7 +416,14 @@ with st.sidebar.expander("📤 작업지시 등록 (엑셀 + PDF 선택)", expan
                         },
                     )
                     lot_data["qty"] += entry["qty"]
-                    lot_data["move_cards"].extend(entry["move_cards"])
+
+                    for card in entry["move_cards"]:
+                        owner = move_card_owner.get(card)
+                        if owner and owner != lot_key_value:
+                            # 이동카드 1개는 하나의 LOT에만 매핑
+                            continue
+                        move_card_owner[card] = lot_key_value
+                        lot_data["move_cards"].append(card)
 
                 for lot_key_value, lot_data in lot_map.items():
                     insert_lot(
