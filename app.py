@@ -209,13 +209,10 @@ def build_lot_qty_move_groups(df) -> list[dict]:
     lot_cols = detect_lot_columns(df)
     move_cols = detect_move_card_columns(df)
 
-    # 업로드 템플릿에서 우측 블록(P/Q 등)이 최종 원장 데이터인 경우가 많아
-    # LOT 컬럼이 여러 개 감지되면 우측 영역(후반부) 컬럼만 우선 사용
+    # 업로드 템플릿에서 우측 원장 블록(N/O, P/Q 등)이 최종 데이터인 경우가 많아
+    # LOT 컬럼이 여러 개 감지되면 가장 오른쪽 LOT 컬럼을 우선 대상으로 사용
     if len(lot_cols) > 1:
-        pivot = len(cols) // 2
-        right_lot_cols = [c for c in lot_cols if col_index[c] >= pivot]
-        if right_lot_cols:
-            lot_cols = right_lot_cols
+        lot_cols = sorted(lot_cols, key=lambda c: col_index[c], reverse=True)
 
     groups = []
     move_cols_by_name: dict[str, list[str]] = {}
@@ -242,6 +239,10 @@ def build_lot_qty_move_groups(df) -> list[dict]:
             move_col = min(move_cols, key=lambda m: abs(col_index[m] - lot_idx))
 
         groups.append({"lot_col": lot_col, "qty_col": qty_col, "move_col": move_col})
+
+        # 오른쪽 최종 원장 블록 1세트를 우선 사용
+        if len(groups) >= 1 and len(lot_cols) > 1:
+            break
 
     return groups
 
