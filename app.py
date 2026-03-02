@@ -1,4 +1,5 @@
 import os
+import re
 from datetime import datetime
 from html import escape
 from textwrap import dedent
@@ -111,19 +112,62 @@ def detect_lot_column(df):
     return None
 
 
+def _qty_column_score(series: pd.Series) -> float:
+    numeric = pd.to_numeric(series, errors="coerce").dropna()
+    if len(numeric) < 5:
+        return float("-inf")
+
+    int_ratio = (numeric % 1 == 0).mean()
+    positive_ratio = (numeric > 0).mean()
+    small_ratio = (numeric <= 1000).mean()
+    median = float(numeric.median())
+
+    score = (int_ratio * 2.0) + (positive_ratio * 1.5) + (small_ratio * 1.5)
+    if median > 2000:
+        score -= 2.5
+    elif median > 1000:
+        score -= 1.2
+    return score
+
+
+def _qty_header_score(col_name) -> float:
+    name = str(col_name).lower().replace(" ", "")
+    positive_keywords = ["qty", "수량", "계획량", "매수", "ea", "pcs"]
+    negative_keywords = ["규격", "폭", "길이", "두께", "중량", "면적"]
+
+    score = 0.0
+    if any(k in name for k in positive_keywords):
+        score += 1.5
+    if any(k in name for k in negative_keywords):
+        score -= 2.0
+    return score
+
+
 def detect_qty_column(df, lot_col):
     cols = list(df.columns)
     idx = cols.index(lot_col)
-    for col in cols[idx + 1 :]:
-        s = df[col].dropna().head(50)
-        if len(s) == 0:
+
+    candidates: list[tuple[float, int, str]] = []
+    for offset, col in enumerate(cols[idx + 1 :], start=1):
+        sample = df[col].dropna().head(120)
+        score = _qty_column_score(sample)
+        if score == float("-inf"):
             continue
-        try:
-            float(s.iloc[0])
-            return col
-        except Exception:
-            continue
-    return None
+
+        header_bonus = _qty_header_score(col)
+        # LOT과 멀어질수록 감점, 가까운 우측 컬럼 우대
+        distance_penalty = offset * 0.12
+        final_score = score + header_bonus - distance_penalty
+        candidates.append((final_score, offset, col))
+
+    if not candidates:
+        return None
+
+    # 근접 후보(LOT 기준 우측 8칸 이내)가 있으면 우선 선택
+    nearby = [c for c in candidates if c[1] <= 8]
+    target = nearby if nearby else candidates
+    target.sort(key=lambda x: x[0], reverse=True)
+    return target[0][2]
 
 
 def detect_move_card_column(df):
@@ -154,33 +198,88 @@ def detect_move_card_columns(df) -> list[str]:
     return cols
 
 
+def normalize_header_name(col_name) -> str:
+    base = re.sub(r"\.\d+$", "", str(col_name))
+    return re.sub(r"\s+", "", base).lower()
+
+
 def build_lot_qty_move_groups(df) -> list[dict]:
     cols = list(df.columns)
     col_index = {col: i for i, col in enumerate(cols)}
     lot_cols = detect_lot_columns(df)
     move_cols = detect_move_card_columns(df)
 
+    # 업로드 템플릿에서 우측 원장 블록(N/O, P/Q 등)이 최종 데이터인 경우가 많아
+    # LOT 컬럼이 여러 개 감지되면 가장 오른쪽 LOT 컬럼을 우선 대상으로 사용
+    if len(lot_cols) > 1:
+        lot_cols = sorted(lot_cols, key=lambda c: col_index[c], reverse=True)
+
     groups = []
-    used_move_cols = set()
+    move_cols_by_name: dict[str, list[str]] = {}
+    for col in move_cols:
+        move_cols_by_name.setdefault(normalize_header_name(col), []).append(col)
+
     for lot_col in lot_cols:
         qty_col = detect_qty_column(df, lot_col)
+        if not qty_col:
+            continue
+
         lot_idx = col_index[lot_col]
+        lot_base = normalize_header_name(lot_col)
 
-        candidate_moves = [
-            m for m in move_cols
-            if col_index[m] > lot_idx and m not in used_move_cols
-        ]
-        if not candidate_moves:
-            candidate_moves = [m for m in move_cols if m not in used_move_cols]
-
+        # 1순위: LOT 컬럼과 헤더 이름이 같은 이동카드 컬럼
+        # (헤더가 비어있어도 '' 이름으로 비교 가능)
+        same_name_moves = move_cols_by_name.get(lot_base, [])
         move_col = None
-        if candidate_moves:
-            move_col = min(candidate_moves, key=lambda m: abs(col_index[m] - lot_idx))
-            used_move_cols.add(move_col)
+        if same_name_moves:
+            move_col = min(same_name_moves, key=lambda m: abs(col_index[m] - lot_idx))
+
+        # 2순위: 위치 기반 가장 가까운 이동카드 컬럼
+        if not move_col and move_cols:
+            move_col = min(move_cols, key=lambda m: abs(col_index[m] - lot_idx))
 
         groups.append({"lot_col": lot_col, "qty_col": qty_col, "move_col": move_col})
 
-    return [g for g in groups if g["qty_col"]]
+        # 오른쪽 최종 원장 블록 1세트를 우선 사용
+        if len(groups) >= 1 and len(lot_cols) > 1:
+            break
+
+    return groups
+
+
+def collect_lot_entries(df: pd.DataFrame, lot_groups: list[dict]) -> list[dict]:
+    entries: list[dict] = []
+    for _, row in df.iterrows():
+        row_seen: set[tuple[str, int, tuple[str, ...]]] = set()
+        for group in lot_groups:
+            lot_col = group["lot_col"]
+            qty_col = group["qty_col"]
+            move_col = group.get("move_col")
+
+            lot_key = row.get(lot_col)
+            qty = safe_int(row.get(qty_col), None)
+            if pd.isna(lot_key) or qty is None:
+                continue
+
+            lot_key_value = str(lot_key).strip()
+            if not lot_key_value:
+                continue
+
+            move_raw = row.get(move_col) if move_col else ""
+            move_cards = parse_move_cards(move_raw)
+            dedup_key = (lot_key_value, qty, tuple(move_cards))
+            if dedup_key in row_seen:
+                continue
+            row_seen.add(dedup_key)
+
+            entries.append(
+                {
+                    "lot_key": lot_key_value,
+                    "qty": qty,
+                    "move_cards": move_cards,
+                }
+            )
+    return entries
 
 
 def save_upload(uploaded_file, prefix=""):
@@ -278,12 +377,9 @@ with st.sidebar.expander("📤 작업지시 등록 (엑셀 + PDF 선택)", expan
             ok = False
 
         if ok:
-            preview_df = df.copy()
-            preview_df["__lot_key__"] = preview_df[lot_col].astype(str).str.strip()
-            preview_df["__qty__"] = pd.to_numeric(preview_df[qty_col], errors="coerce")
-            preview_df = preview_df[(preview_df["__lot_key__"] != "") & preview_df["__qty__"].notna()]
-            total_rows = len(preview_df)
-            unique_lots = preview_df["__lot_key__"].nunique()
+            preview_entries = collect_lot_entries(df, lot_groups)
+            total_rows = len(preview_entries)
+            unique_lots = len({e["lot_key"] for e in preview_entries})
             duplicated_rows = max(total_rows - unique_lots, 0)
             st.caption(f"업로드 미리보기: 유효 행 {total_rows}건 / 고유 LOT {unique_lots}건 / LOT 중복 행 {duplicated_rows}건")
             st.info("같은 LOT가 여러 행에 있으면 수량은 합산되고 이동카드는 중복 제거 후 함께 저장됩니다.")
@@ -317,27 +413,29 @@ with st.sidebar.expander("📤 작업지시 등록 (엑셀 + PDF 선택)", expan
                 )
 
                 lot_map: dict[str, dict] = {}
+                move_card_owner: dict[str, str] = {}
 
-                for _, row in sub.iterrows():
-                    lot_key = row.get(lot_col)
-                    qty = safe_int(row.get(qty_col), None)
-                    if pd.isna(lot_key) or qty is None:
-                        continue
-
-                    lot_key_value = str(lot_key).strip()
-                    if not lot_key_value:
-                        continue
-
-                    move = row.get(move_col) if move_col else ""
+                for entry in collect_lot_entries(sub, lot_groups):
+                    lot_key_value = entry["lot_key"]
                     lot_data = lot_map.setdefault(
                         lot_key_value,
                         {
                             "qty": 0,
+                            "qty_candidates": set(),
                             "move_cards": [],
                         },
                     )
-                    lot_data["qty"] += qty
-                    lot_data["move_cards"].extend(parse_move_cards(move))
+                    lot_data["qty_candidates"].add(entry["qty"])
+                    # 동일 LOT가 이동카드 개수만큼 반복되는 템플릿을 고려해 수량은 합산하지 않고 대표값(최대값) 사용
+                    lot_data["qty"] = max(lot_data["qty_candidates"])
+
+                    for card in entry["move_cards"]:
+                        owner = move_card_owner.get(card)
+                        if owner and owner != lot_key_value:
+                            # 이동카드 1개는 하나의 LOT에만 매핑
+                            continue
+                        move_card_owner[card] = lot_key_value
+                        lot_data["move_cards"].append(card)
 
                 for lot_key_value, lot_data in lot_map.items():
                     insert_lot(
@@ -369,13 +467,13 @@ for idx, equip in enumerate(EQUIP_TABS):
     with tabs[idx]:
         c1, c2, c3, c4 = st.columns([1.3, 1, 1, 2])
         with c1:
-            worker_mode = st.toggle("🧤 작업자 모드", value=True, key=f"worker_{equip}")
+            worker_mode = st.toggle("🧤 작업자 모드", value=False, key=f"worker_{equip}")
         with c2:
             show_completed = st.checkbox("완료 포함", value=False, key=f"comp_{equip}")
         with c3:
             show_void = st.checkbox("취소 포함", value=False, key=f"void_{equip}")
         with c4:
-            st.caption("작업자 모드 ON + 미완료 기본 표시")
+            st.caption("기본: 관리자 모드 / 필요 시 작업자 모드 전환")
 
         equip_wos = [w for w in ALL_WOS if w.get("equipment") == equip]
         if not show_void:
@@ -496,7 +594,6 @@ for idx, equip in enumerate(EQUIP_TABS):
                 for lot in pending_lots:
                     lot_key = str(lot.get("lot_key", ""))
                     qty = safe_int(lot.get("qty"), 0)
-                    move = format_move_cards_for_display(lot.get("move_card_no", ""))
                     body = dedent(f"""
                     <div style='display:flex; gap:20px; justify-content:space-between; flex-wrap:wrap;'>
                       <div style='min-width:180px;'>
@@ -508,8 +605,8 @@ for idx, equip in enumerate(EQUIP_TABS):
                         <div style='font-size:30px; font-weight:800; margin-top:8px;'>{qty}</div>
                       </div>
                       <div style='min-width:220px;'>
-                        <div style='font-size:14px; color:#6b7280; border-bottom:1px solid #e5e7eb; padding-bottom:4px;'>이동카드</div>
-                        <div style='font-size:24px; font-weight:800; margin-top:8px; white-space:pre-line;'>{escape(move)}</div>
+                        <div style='font-size:14px; color:#6b7280; border-bottom:1px solid #e5e7eb; padding-bottom:4px;'>작업상태</div>
+                        <div style='font-size:24px; font-weight:800; margin-top:8px; white-space:pre-line;'>대기중</div>
                       </div>
                     </div>
                     """).strip()
@@ -532,18 +629,17 @@ for idx, equip in enumerate(EQUIP_TABS):
 
                 for lot in lots:
                     lot_id = lot.get("id")
-                    lc1, lc2, lc3, lc4, lc5 = st.columns([4.5, 1, 1.2, 2.2, 1.5])
+                    lc1, lc2, lc3, lc4 = st.columns([6, 1.2, 1.5, 1.8])
                     lc1.write(f"**{lot.get('lot_key', '')}**")
                     lc2.write(lot.get("qty", ""))
                     lc3.write(f"`{lot.get('status', '')}`")
-                    lc4.write(format_move_cards_for_display(lot.get("move_card_no", "")))
 
                     if wo_status == "VOID":
-                        lc5.write("—")
+                        lc4.write("—")
                         continue
 
                     if lot.get("status") == "WAITING":
-                        if lc5.button("완료", key=f"admin_done_{equip}_{selected_id}_{lot_id}"):
+                        if lc4.button("완료", key=f"admin_done_{equip}_{selected_id}_{lot_id}"):
                             update_lot_status(lot_id, "DONE")
                             lot_preview = [
                                 dict(x, status=("DONE" if str(x.get("id")) == str(lot_id) else x.get("status")))
@@ -554,7 +650,7 @@ for idx, equip in enumerate(EQUIP_TABS):
                             append_ledger("DONE", "system", selected_id, lot_id, "")
                             st.rerun()
                     else:
-                        if lc5.button("완료취소", key=f"admin_undo_{equip}_{selected_id}_{lot_id}"):
+                        if lc4.button("완료취소", key=f"admin_undo_{equip}_{selected_id}_{lot_id}"):
                             update_lot_status(lot_id, "WAITING")
                             lot_preview = [
                                 dict(x, status=("WAITING" if str(x.get("id")) == str(lot_id) else x.get("status")))
