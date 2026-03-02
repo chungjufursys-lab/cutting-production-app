@@ -54,6 +54,21 @@ def safe_int(v, default=None):
         return default
 
 
+def parse_qty_value(raw_value):
+    if pd.isna(raw_value):
+        return None, None
+
+    text = str(raw_value).strip()
+    if not text:
+        return None, None
+
+    qty_num = safe_int(raw_value, None)
+    if qty_num is not None:
+        return qty_num, qty_num
+
+    return text, None
+
+
 def now_str():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -114,7 +129,7 @@ def detect_lot_column(df):
 
 def _qty_column_score(series: pd.Series) -> float:
     numeric = pd.to_numeric(series, errors="coerce").dropna()
-    if len(numeric) < 5:
+    if len(numeric) < 1:
         return float("-inf")
 
     int_ratio = (numeric % 1 == 0).mean()
@@ -127,6 +142,10 @@ def _qty_column_score(series: pd.Series) -> float:
         score -= 2.5
     elif median > 1000:
         score -= 1.2
+
+    # 샘플 행이 적은 업로드(예: 2~4행)는 신뢰도 보정
+    if len(numeric) < 5:
+        score -= (5 - len(numeric)) * 0.35
     return score
 
 
@@ -150,11 +169,14 @@ def detect_qty_column(df, lot_col):
     candidates: list[tuple[float, int, str]] = []
     for offset, col in enumerate(cols[idx + 1 :], start=1):
         sample = df[col].dropna().head(120)
+        header_bonus = _qty_header_score(col)
         score = _qty_column_score(sample)
         if score == float("-inf"):
-            continue
+            # 숫자 샘플이 없어도 수량성 헤더가 명확하면 후보로 유지
+            if header_bonus <= 0:
+                continue
+            score = 0.0
 
-        header_bonus = _qty_header_score(col)
         # LOT과 멀어질수록 감점, 가까운 우측 컬럼 우대
         distance_penalty = offset * 0.12
         final_score = score + header_bonus - distance_penalty
@@ -257,8 +279,8 @@ def collect_lot_entries(df: pd.DataFrame, lot_groups: list[dict]) -> list[dict]:
             move_col = group.get("move_col")
 
             lot_key = row.get(lot_col)
-            qty = safe_int(row.get(qty_col), None)
-            if pd.isna(lot_key) or qty is None:
+            qty_value, qty_num = parse_qty_value(row.get(qty_col))
+            if pd.isna(lot_key) or qty_value is None:
                 continue
 
             lot_key_value = str(lot_key).strip()
@@ -267,7 +289,7 @@ def collect_lot_entries(df: pd.DataFrame, lot_groups: list[dict]) -> list[dict]:
 
             move_raw = row.get(move_col) if move_col else ""
             move_cards = parse_move_cards(move_raw)
-            dedup_key = (lot_key_value, qty, tuple(move_cards))
+            dedup_key = (lot_key_value, str(qty_value), tuple(move_cards))
             if dedup_key in row_seen:
                 continue
             row_seen.add(dedup_key)
@@ -275,7 +297,8 @@ def collect_lot_entries(df: pd.DataFrame, lot_groups: list[dict]) -> list[dict]:
             entries.append(
                 {
                     "lot_key": lot_key_value,
-                    "qty": qty,
+                    "qty": qty_value,
+                    "qty_num": qty_num,
                     "move_cards": move_cards,
                 }
             )
@@ -420,14 +443,20 @@ with st.sidebar.expander("📤 작업지시 등록 (엑셀 + PDF 선택)", expan
                     lot_data = lot_map.setdefault(
                         lot_key_value,
                         {
-                            "qty": 0,
+                            "qty": "",
                             "qty_candidates": set(),
                             "move_cards": [],
                         },
                     )
-                    lot_data["qty_candidates"].add(entry["qty"])
-                    # 동일 LOT가 이동카드 개수만큼 반복되는 템플릿을 고려해 수량은 합산하지 않고 대표값(최대값) 사용
-                    lot_data["qty"] = max(lot_data["qty_candidates"])
+
+                    qty_num = entry.get("qty_num")
+                    if qty_num is not None:
+                        lot_data["qty_candidates"].add(qty_num)
+                        # 동일 LOT가 이동카드 개수만큼 반복되는 템플릿을 고려해 수량은 합산하지 않고 대표값(최대값) 사용
+                        lot_data["qty"] = max(lot_data["qty_candidates"])
+                    elif not lot_data["qty_candidates"] and not lot_data["qty"]:
+                        # 숫자가 아닌 수량값(B-6 등)은 상세 표시용으로 원문 유지
+                        lot_data["qty"] = entry["qty"]
 
                     for card in entry["move_cards"]:
                         owner = move_card_owner.get(card)
