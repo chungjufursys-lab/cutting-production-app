@@ -209,6 +209,14 @@ def build_lot_qty_move_groups(df) -> list[dict]:
     lot_cols = detect_lot_columns(df)
     move_cols = detect_move_card_columns(df)
 
+    # 업로드 템플릿에서 우측 블록(P/Q 등)이 최종 원장 데이터인 경우가 많아
+    # LOT 컬럼이 여러 개 감지되면 우측 영역(후반부) 컬럼만 우선 사용
+    if len(lot_cols) > 1:
+        pivot = len(cols) // 2
+        right_lot_cols = [c for c in lot_cols if col_index[c] >= pivot]
+        if right_lot_cols:
+            lot_cols = right_lot_cols
+
     groups = []
     move_cols_by_name: dict[str, list[str]] = {}
     for col in move_cols:
